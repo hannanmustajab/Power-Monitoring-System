@@ -5,8 +5,28 @@
  * Date:
  */
 
-const char releaseNumber[8] = "16.00";                                                      // Displays the release on the menu
+// v1.00  - First release: Changed to emonLibrary, state machine working fine on argon, 10 seconds publish frequency. 
+// v1.01  - Fixed error state bug, added waituntill particle connect, added functions for changing constant value and showing them in console.
 
+const char releaseNumber[8] = "1.01";                                                      // Displays the release on the menu
+
+// Included Libraries
+#include "math.h"
+#include "PublishQueueAsyncRK.h"                                                            // Async Particle Publish
+#include "MB85RC256V-FRAM-RK.h"                                                             // Rickkas Particle based FRAM Library
+#include "MCP79410RK.h"                                                                     // Real Time Clock
+#include "EmonLib.h"                                                                        // Include Emon Library
+
+
+// Prototypes and System Mode calls
+SYSTEM_MODE(AUTOMATIC);                                                                     // This will enable user code to start executing automatically.
+SYSTEM_THREAD(ENABLED);                                                                     // Means my code will not be held up by Particle processes.
+STARTUP(System.enableFeature(FEATURE_RESET_INFO));
+MB85RC64 fram(Wire, 0);                                                                     // Rickkas' FRAM library
+MCP79410 rtc;                                                                               // Rickkas MCP79410 libarary
+retained uint8_t publishQueueRetainedBuffer[2048];                                          // Create a buffer in FRAM for cached publishes
+PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
+Timer keepAliveTimer(1000, keepAliveMessage);
 
 // Define the memory map - note can be EEPROM or FRAM - moving to FRAM for speed and to avoid memory wear
 namespace FRAM {                                                                            // Moved to namespace instead of #define to limit scope
@@ -19,7 +39,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 2;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 5;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -48,7 +68,7 @@ struct systemStatus_structure {
 } sysStatus;
 
 struct sensor_constants{
-   double sensorOneConstant;
+   double sensorOneConstant = 90.91;
    double sensorTwoConstant;
    double sensorThreeConstant;
    double sensorFourConstant;
@@ -57,7 +77,7 @@ struct sensor_constants{
 } sensorConstants;
 
 struct sensor_data_struct {                                                               // Here we define the structure for collecting and storing data from the sensors
-  float sensorOneCurrent = 90.91;
+  float sensorOneCurrent;
   float sensorTwoCurrent;
   float sensorThreeCurrent;
   float sensorFourCurrent;
@@ -67,27 +87,6 @@ struct sensor_data_struct {                                                     
   int stateOfCharge;
   bool validData;
 } sensorData;
-
-
-// Included Libraries
-#include "math.h"
-#include "adafruit-sht31.h"
-#include "PublishQueueAsyncRK.h"                                                            // Async Particle Publish
-#include "MB85RC256V-FRAM-RK.h"                                                             // Rickkas Particle based FRAM Library
-#include "MCP79410RK.h"                                                                     // Real Time Clock
-#include "AC_MonitorLib.h"         // Include Load_Monitoring Library
-
-
-// Prototypes and System Mode calls
-SYSTEM_MODE(AUTOMATIC);                                                                     // This will enable user code to start executing automatically.
-SYSTEM_THREAD(ENABLED);                                                                     // Means my code will not be held up by Particle processes.
-STARTUP(System.enableFeature(FEATURE_RESET_INFO));
-Adafruit_SHT31 sht31 = Adafruit_SHT31();
-MB85RC64 fram(Wire, 0);                                                                     // Rickkas' FRAM library
-MCP79410 rtc;                                                                               // Rickkas MCP79410 libarary
-retained uint8_t publishQueueRetainedBuffer[2048];                                          // Create a buffer in FRAM for cached publishes
-PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
-Timer keepAliveTimer(1000, keepAliveMessage);
 
 
 // State Machine Variables
@@ -117,9 +116,17 @@ bool dataInFlight = false;
 char temperatureString[16];
 char humidityString[16];
 char batteryContextStr[16];                                                                 // One word that describes whether the device is getting power, charging, discharging or too cold to charge
+// Constant Values to be printed in console.
+char sensorOneConstantStr[16];                                                                      // String for Sensor One Constant Value
+char sensorTwoConstantStr[16];
+char sensorThreeConstantStr[16];
+char sensorFourConstantStr[16];
+char sensorFiveConstantStr[16];
+char sensorSixConstantStr[16];
 char batteryString[16];
 bool sysStatusWriteNeeded = false;                                                       // Keep track of when we need to write     
 bool sensorDataWriteNeeded = false; 
+bool constantsStatusWriteNeeded = false;
 
 // Variables
 double current_irms             = 0;
@@ -129,6 +136,8 @@ double previous_irms            = 0;
 const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
 
 
+/************************CT LIBRARY RELATED Instances, Pinouts etc.***********************************/
+
 //  Pins assignment/Functions definition-> DON'T CHANGE/MODIFY THESE                               
 uint8_t CT1_PIN=A0;
 uint8_t CT2_PIN=A1;
@@ -137,15 +146,9 @@ uint8_t CT4_PIN=A3;
 uint8_t CT5_PIN=A4;
 uint8_t CT6_PIN=A5;
 
-Load_Monitor KUMVA_IO;     //Create an instance
+// Initialize the emon library.
 
-
-Load_Monitor::CT_Property_Struct Lighting_meter_FirstFloor={CT1_PIN, sensorConstants.sensorOneConstant};
-
-float I_LightingFirstFloor=0;
-float P_LightingFirstFloor=0;
-double Vrms=220;    // Standard Utility Voltage , Can be modified for better accuracy
-
+EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6;               // Create an instance
 
 
 /*************************************END************************************************************/
@@ -163,35 +166,37 @@ void setup() {
   char StartupMessage[64] = "Startup Successful";                                           // Messages from Initialization
   state = INITIALIZATION_STATE;
 
-  char responseTopic[125];
-  String deviceID = System.deviceID();                                                      // Multiple Electrons share the same hook - keeps things straight
-  deviceID.toCharArray(responseTopic,125);
-  Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);                            // Subscribe to the integration response event
+  Particle.subscribe(System.deviceID() + "/hook-response/powermonitoring_hook/", UbidotsHandler, MY_DEVICES);
 
   // Particle Variables for debugging and mobile application
   Particle.variable("Release",releaseNumber);
-  Particle.variable("temperature", temperatureString);
-  Particle.variable("humidity", humidityString);
   Particle.variable("Battery", batteryString);                                              // Battery level in V as the Argon does not have a fuel cell
   Particle.variable("BatteryContext",batteryContextStr);
   Particle.variable("Keep Alive Sec",sysStatus.keepAlive);
   Particle.variable("3rd Party Sim", sysStatus.thirdPartySim);
+  
+  Particle.variable("Constant One", sensorConstants.sensorOneConstant);
+  Particle.variable("Constant Two", sensorConstants.sensorTwoConstant);
+  Particle.variable("Constant Three", sensorConstants.sensorThreeConstant);
+  Particle.variable("Constant Four", sensorConstants.sensorFourConstant);
+  Particle.variable("Constant Five", sensorConstants.sensorFiveConstant);
+  Particle.variable("Constant Six", sensorConstants.sensorSixConstant);
+
 
   Particle.function("Measure-Now",measureNow);
   Particle.function("Verbose-Mode",setVerboseMode);
   Particle.function("Keep Alive",setKeepAlive);
   Particle.function("3rd Party Sim", setThirdPartySim);
+  Particle.function("Set Constant One",setConstantOne);
+  Particle.function("Set Constant Two",setConstantTwo);
+  Particle.function("Set Constant Three",setConstantThree);
+  Particle.function("Set Constant Four",setConstantFour);
+  Particle.function("Set Constant Five",setConstantFive);
+  Particle.function("Set Constant Six",setConstantSix);
+
 
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
-
-
-
-  if (!sht31.begin(0x44)) {                                                                 // Start the i2c connected SHT-31 sensor
-    snprintf(StartupMessage,sizeof(StartupMessage),"Error - SHT31 Initialization");
-    state = ERROR_STATE;
-    resetTimeStamp = millis();
-  }
 
   // Load FRAM and reset variables to their correct values
   fram.begin();                                                                             // Initialize the FRAM module
@@ -213,6 +218,14 @@ void setup() {
 
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
+  // Initialize all emon instances and sensors.
+  emon1.current(CT1_PIN,sensorConstants.sensorOneConstant);
+  emon2.current(CT2_PIN,sensorConstants.sensorTwoConstant);
+  emon3.current(CT3_PIN,sensorConstants.sensorThreeConstant);
+  emon4.current(CT4_PIN,sensorConstants.sensorFourConstant);
+  emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
+  emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
+
   if (sysStatus.thirdPartySim) {
     waitFor(Particle.connected,30 * 1000); 
     Particle.keepAlive(sysStatus.keepAlive);                                              // Set the keep alive value
@@ -223,8 +236,11 @@ void setup() {
 
   if(sysStatus.verboseMode) publishQueue.publish("Startup",StartupMessage,PRIVATE);                       // Let Particle know how the startup process went
 
-  if (state == INITIALIZATION_STATE) state = IDLE_STATE;                                    // We made it throughgo let's go to idle
+  waitUntil(Particle.connected);
 
+  if (state == INITIALIZATION_STATE) state = IDLE_STATE;                                    // We made it throughgo let's go to idle
+  
+  publishQueue.publish("DEBUG- Startup",stateNames[state],PRIVATE);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
@@ -245,7 +261,7 @@ void loop() {
     }
     else {
       state = REPORTING_STATE;
-      previous_irms = current_irms;
+      // previous_irms = current_irms;
     }
     break;
 
@@ -253,10 +269,13 @@ void loop() {
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
     if (Particle.connected()) {
       if (Time.hour() == 12) Particle.syncTime();                                           // Set the clock each day at noon
+      takeMeasurements();
       sendEvent();                                                                          // Send data to Ubidots
       state = RESP_WAIT_STATE;                                                              // Wait for Response
     }
     else {
+      publishQueue.publish("DEBUG- Startup","ERROR FROM REPORTING",PRIVATE);
+      publishQueue.publish("DEBUG- PARTICLE CONNECTED",String(Particle.connected()),PRIVATE);
       state = ERROR_STATE;
       resetTimeStamp = millis();
     }
@@ -293,7 +312,6 @@ void loop() {
 
   if (watchdogFlag) petWatchdog();                                                          // Watchdog flag is raised - time to pet the watchdog
 
-
   if (sysStatusWriteNeeded) {
     fram.put(FRAM::sysStatusAddr,sysStatus);
     sysStatusWriteNeeded = false;
@@ -302,6 +320,11 @@ void loop() {
   if (sensorDataWriteNeeded) {
     fram.put(FRAM::sensorDataAddr,sensorData);
     sensorDataWriteNeeded = false;
+  }
+
+  if (constantsStatusWriteNeeded) {
+    fram.put(FRAM::sensorConstantsAddr,sensorConstants);
+      constantsStatusWriteNeeded = false;
   }
 
 }
@@ -324,7 +347,7 @@ void checkSystemValues() {                                                      
     else sysStatus.connectedStatus = false;
   }
   if (sysStatus.keepAlive < 0 || sysStatus.keepAlive > 1200) sysStatus.keepAlive = 600;
-  if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = false;
+  if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = true;
   if (sysStatus.lowBatteryMode < 0 || sysStatus.lowBatteryMode > 1) sysStatus.lowBatteryMode = 0;
   if (sysStatus.resetCount < 0 || sysStatus.resetCount > 255) sysStatus.resetCount = 0;
   sysStatusWriteNeeded = true;
@@ -350,74 +373,29 @@ void keepAliveMessage() {
 
 void sendEvent()
 {
-  char data[100];                 
-  snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f}", I_LightingFirstFloor);
+  char data[512];                 
+  snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
   publishQueue.publish("powermonitoring_hook", data, PRIVATE);
   dataInFlight = true;                                                                      // set the data inflight flag
   webhookTimeStamp = millis();
 }
 
-void UbidotsHandler(const char *event, const char *data)                                    // Looks at the response from Ubidots - Will reset Photon if no successful response
-{                                                                                           // Response Template: "{{hourly.0.status_code}}" so, I should only get a 3 digit number back
-  // Response Template: "{{hourly.0.status_code}}"
-  if (!data) {                                                                    // First check to see if there is any data
-    if (sysStatus.verboseMode) {
-      publishQueue.publish("Ubidots Hook", "No Data", PRIVATE);
-    }
-    return;
+void UbidotsHandler(const char *event, const char *data) {            // Looks at the response from Ubidots - Will reset Photon if no successful response
+  char responseString[64];
+    // Response is only a single number thanks to Template
+  if (!strlen(data)) {                                                // No data in response - Error
+    snprintf(responseString, sizeof(responseString),"No Data");
   }
-  int responseCode = atoi(data);                                                  // Response is only a single number thanks to Template
-  if ((responseCode == 200) || (responseCode == 201))
-  {
-    if (sysStatus.verboseMode) {
-      publishQueue.publish("State", "Response Received", PRIVATE);
-    }
-    dataInFlight = false;    
-
+  else if (atoi(data) == 200 || atoi(data) == 201) {
+    snprintf(responseString, sizeof(responseString),"Response Received");
+    sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
+    sysStatusWriteNeeded = true;
+    dataInFlight = false;                                             // Data has been received
   }
-  else if (sysStatus.verboseMode) {  
-    publishQueue.publish("Ubidots Hook", data, PRIVATE);                              // Publish the response code
+  else {
+    snprintf(responseString, sizeof(responseString), "Unknown response recevied %i",atoi(data));
   }
-
-
-}
-
-void Single_Phase_Monitor(Load_Monitor::CT_Property_Struct Load_Name, float *Current_rms,float *Power){
-  
-  double i_rms=0;
-   i_rms=KUMVA_IO.calcIrms(Load_Name);
-  
-  *Current_rms=i_rms;
-  *Power=((i_rms*Vrms)/1000); //in kW
-}
-
-// These are the functions that are part of the takeMeasurements call
-
-bool takeMeasurements() {
-  sensorData.validData = false;
-  getBatteryContext();                    
-
-  /* Examples of Single phase loads
- 
-    * a load is a single phase when it use only one CT
-    * is connected to CTx (Ax)
-    * The CT used calibration constant is CTx_Cal: calibration const; 
-    * Create a struct as shown below: 
-  */
-
-  Single_Phase_Monitor(Lighting_meter_FirstFloor,&I_LightingFirstFloor,&P_LightingFirstFloor);
- 
-  current_irms = I_LightingFirstFloor;                                  // Calculate Irms only
-  if (abs(current_irms - previous_irms) > 0.5){
-    // Indicate that this is a valid data array and store it
-    sensorData.validData = true;
-    sensorData.timeStamp = Time.now();
-    sensorDataWriteNeeded = true;
-    publishQueue.publish("sensor_data",String(current_irms),PRIVATE);
-    return 1;
-  } 
-  else return 1;
-  publishQueue.publish("sensor_data",String(current_irms),PRIVATE);
+  publishQueue.publish("Ubidots Hook", responseString, PRIVATE);
 }
 
 // Function to Blink the LED for alerting. 
@@ -465,7 +443,6 @@ int setVerboseMode(String command) // Function to force sending data in current 
   else return 0;
 }
 
-
 void publishStateTransition(void)
 {
   char stateTransitionString[40];
@@ -473,7 +450,6 @@ void publishStateTransition(void)
   oldState = state;
   if(Particle.connected()) publishQueue.publish("State Transition",stateTransitionString, PRIVATE);
 }
-
 
 int setThirdPartySim(String command) // Function to force sending data in current hour
 {
@@ -496,7 +472,6 @@ int setThirdPartySim(String command) // Function to force sending data in curren
   else return 0;
 }
 
-
 int setKeepAlive(String command)
 {
   char * pEND;
@@ -512,7 +487,6 @@ int setKeepAlive(String command)
   return 1;
 }
 
-
 void getBatteryContext() 
 {
   const char* batteryContext[7] ={"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
@@ -522,4 +496,86 @@ void getBatteryContext()
   sysStatusWriteNeeded = true;
 }
 
+/*
+  * These functions change the values of the constant. 
+*/
 
+// Function Prototypes
+int setConstantOne(String command){
+  sensorConstants.sensorOneConstant = command.toFloat();
+  publishQueue.publish("Constant One Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+int setConstantTwo(String command){
+  sensorConstants.sensorTwoConstant = command.toFloat();
+  publishQueue.publish("Constant Two Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+int setConstantThree(String command){
+  sensorConstants.sensorThreeConstant = command.toFloat();
+  publishQueue.publish("Constant Three Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+int setConstantFour(String command){
+  sensorConstants.sensorFourConstant = command.toFloat();
+  publishQueue.publish("Constant Four Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+int setConstantFive(String command){
+  sensorConstants.sensorFiveConstant = command.toFloat();
+  publishQueue.publish("Constant Five Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+int setConstantSix(String command){
+  sensorConstants.sensorSixConstant = command.toFloat();
+  publishQueue.publish("Constant Six Value set to ",String(command),PRIVATE);
+  return 1;
+}
+
+// This function updates the constants value string in the console. 
+void updateThresholdValue()
+{   
+    snprintf(sensorOneConstantStr,sizeof(sensorOneConstantStr),"Sensor One Constant : %3.1f", sensorConstants.sensorOneConstant);
+    snprintf(sensorTwoConstantStr,sizeof(sensorTwoConstantStr),"Sensor Two Constant : %3.1f", sensorConstants.sensorTwoConstant);
+    snprintf(sensorThreeConstantStr,sizeof(sensorThreeConstantStr),"Sensor Three Constant : %3.1f", sensorConstants.sensorThreeConstant);
+    snprintf(sensorFourConstantStr,sizeof(sensorFourConstantStr),"Sensor Four Constant : %3.1f", sensorConstants.sensorFourConstant);
+    snprintf(sensorFiveConstantStr,sizeof(sensorFiveConstantStr),"Sensor Five Constant : %3.1f", sensorConstants.sensorFiveConstant);
+    snprintf(sensorSixConstantStr,sizeof(sensorSixConstantStr),"Sensor Six Constant : %3.1f", sensorConstants.sensorSixConstant);
+    constantsStatusWriteNeeded = true;                                                         // This function is called when there is a change so, we need to update the FRAM
+} 
+
+
+
+
+
+// These are the functions that are part of the takeMeasurements call
+
+bool takeMeasurements() 
+{
+
+    sensorData.validData = false;
+    
+    getBatteryContext();     
+
+    sensorData.sensorOneCurrent =   emon1.calcIrms(1480);
+    sensorData.sensorTwoCurrent =   emon2.calcIrms(1480);
+    sensorData.sensorThreeCurrent=  emon3.calcIrms(1480);
+    sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
+    sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+    sensorData.sensorSixCurrent =   emon6.calcIrms(1480);
+
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+
+  }
+
+
+  
