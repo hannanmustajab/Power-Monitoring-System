@@ -4,12 +4,12 @@
 
 
 //--------------------------------------------------------------------------- Pins assignment/Functions definition-> DON'T CHANGE/MODIFY THESE                               
-uint8_t CT1_PIN=A0;
-uint8_t CT2_PIN=A1;
-uint8_t CT3_PIN=A2;
-uint8_t CT4_PIN=A3;
-uint8_t CT5_PIN=A4;
-uint8_t CT6_PIN=A5;
+uint8_t CT1_PIN=A5;
+uint8_t CT2_PIN=A4;
+uint8_t CT3_PIN=A3;
+uint8_t CT4_PIN=A2;
+uint8_t CT5_PIN=A1;
+uint8_t CT6_PIN=A0;
 
 double Vrms=220;    // Standard Utility Voltage , Can be modified for better accuracy
 

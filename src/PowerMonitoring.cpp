@@ -12,6 +12,10 @@
  */
 
 // v1.00  - First release: Changed to emonLibrary, state machine working fine on argon, 10 seconds publish frequency. 
+// v1.01  - Fixed error state bug, added waituntill particle connect, added functions for changing constant value and showing them in console.
+// v1.02  - Added check in takeMeasurements to send data if sensor is connected. 
+// v1.03 -  Fixed pin chart.
+// v1.04 - Added a particle function to enable sensors from the console.
 
 void setup();
 void loop();
@@ -35,10 +39,12 @@ int setConstantThree(String command);
 int setConstantFour(String command);
 int setConstantFive(String command);
 int setConstantSix(String command);
-void updateThresholdValue();
+void updateConstantValues();
+int enableSensor(String Sensor);
 bool takeMeasurements();
-#line 10 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
-const char releaseNumber[8] = "1.00";                                                      // Displays the release on the menu
+void getBatteryCharge();
+#line 14 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
+const char releaseNumber[8] = "1.04";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -69,7 +75,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 5;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 9;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -82,37 +88,38 @@ struct systemStatus_structure {
   uint8_t batteryState;                                                                     // Stores the current battery state
   int resetCount;                                                                           // reset count of device (0-256)
   unsigned long lastHookResponse;                                                           // Last time we got a valid Webhook response
-  bool sensorOneConnected;                                                                  // Check if sensor One is connected.                                   
-  bool sensorTwoConnected;                                                                  // Check if sensor Two is connected.                                   
-  bool sensorThreeConnected;                                                                // Check if sensor Three is connected.                                   
-  bool sensorFourConnected;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorFiveConnected;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorSixConnected;                                                                  // Check if sensor Three is connected.                                   
+  bool sensorOneConnected = true;                                                                  // Check if sensor One is connected.                                   
+  bool sensorTwoConnected = false;                                                                  // Check if sensor Two is connected.                                   
+  bool sensorThreeConnected = false;                                                                // Check if sensor Three is connected.                                   
+  bool sensorFourConnected = false;                                                                 // Check if sensor Three is connected.                                   
+  bool sensorFiveConnected = false;                                                                 // Check if sensor Three is connected.                                   
+  bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.                                   
   uint8_t operatingMode;                                                                    // Check the operation mode,  
   /*
     * 1 if single phase mode
     * 2 if three phase mode with 3 wires.
     * 3 if three phase mode with 4 wires.
   */                   
-  int Vrms;                                                                                  // Default voltage value        
+  int Vrms;          // Default voltage value     
+  
 } sysStatus;
 
 struct sensor_constants{
    double sensorOneConstant = 90.91;
-   double sensorTwoConstant;
-   double sensorThreeConstant;
-   double sensorFourConstant;
-   double sensorFiveConstant;
-   double sensorSixConstant;
+   double sensorTwoConstant = 90.91;
+   double sensorThreeConstant = 90.91;
+   double sensorFourConstant = 90.91;
+   double sensorFiveConstant = 90.91;
+   double sensorSixConstant = 90.91;
 } sensorConstants;
 
 struct sensor_data_struct {                                                               // Here we define the structure for collecting and storing data from the sensors
-  float sensorOneCurrent;
-  float sensorTwoCurrent;
-  float sensorThreeCurrent;
-  float sensorFourCurrent;
-  float sensorFiveCurrent;
-  float sensorSixCurrent;
+  float sensorOneCurrent=0;
+  float sensorTwoCurrent=0;
+  float sensorThreeCurrent=0;
+  float sensorFourCurrent=0;
+  float sensorFiveCurrent=0;
+  float sensorSixCurrent=0;
   unsigned long timeStamp;
   int stateOfCharge;
   bool validData;
@@ -146,6 +153,7 @@ bool dataInFlight = false;
 char temperatureString[16];
 char humidityString[16];
 char batteryContextStr[16];                                                                 // One word that describes whether the device is getting power, charging, discharging or too cold to charge
+
 // Constant Values to be printed in console.
 char sensorOneConstantStr[16];                                                                      // String for Sensor One Constant Value
 char sensorTwoConstantStr[16];
@@ -154,10 +162,11 @@ char sensorFourConstantStr[16];
 char sensorFiveConstantStr[16];
 char sensorSixConstantStr[16];
 char batteryString[16];
+
 bool sysStatusWriteNeeded = false;                                                       // Keep track of when we need to write     
 bool sensorDataWriteNeeded = false; 
 bool constantsStatusWriteNeeded = false;
-
+float voltage;                                                                             // Battery voltge Argon
 // Variables
 double current_irms             = 0;
 double previous_irms            = 0;
@@ -165,16 +174,15 @@ double previous_irms            = 0;
 // Time Period Related Variables
 const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
 
-
 /************************CT LIBRARY RELATED Instances, Pinouts etc.***********************************/
 
 //  Pins assignment/Functions definition-> DON'T CHANGE/MODIFY THESE                               
-uint8_t CT1_PIN=A0;
-uint8_t CT2_PIN=A1;
-uint8_t CT3_PIN=A2;
-uint8_t CT4_PIN=A3;
-uint8_t CT5_PIN=A4;
-uint8_t CT6_PIN=A5;
+uint8_t CT1_PIN=A5;
+uint8_t CT2_PIN=A4;
+uint8_t CT3_PIN=A3;
+uint8_t CT4_PIN=A2;
+uint8_t CT5_PIN=A1;
+uint8_t CT6_PIN=A0;
 
 // Initialize the emon library.
 
@@ -223,6 +231,7 @@ void setup() {
   Particle.function("Set Constant Four",setConstantFour);
   Particle.function("Set Constant Five",setConstantFive);
   Particle.function("Set Constant Six",setConstantSix);
+  Particle.function("Enable Sensor",enableSensor);                                          // Use this function to enable or disable a sensor from the console.
 
 
   rtc.setup();                                                        // Start the real time clock
@@ -354,7 +363,7 @@ void loop() {
 
   if (constantsStatusWriteNeeded) {
     fram.put(FRAM::sensorConstantsAddr,sensorConstants);
-      constantsStatusWriteNeeded = false;
+    constantsStatusWriteNeeded = false;
   }
 
 }
@@ -534,70 +543,118 @@ void getBatteryContext()
 int setConstantOne(String command){
   sensorConstants.sensorOneConstant = command.toFloat();
   publishQueue.publish("Constant One Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 int setConstantTwo(String command){
   sensorConstants.sensorTwoConstant = command.toFloat();
   publishQueue.publish("Constant Two Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 int setConstantThree(String command){
   sensorConstants.sensorThreeConstant = command.toFloat();
   publishQueue.publish("Constant Three Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 int setConstantFour(String command){
   sensorConstants.sensorFourConstant = command.toFloat();
   publishQueue.publish("Constant Four Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 int setConstantFive(String command){
   sensorConstants.sensorFiveConstant = command.toFloat();
   publishQueue.publish("Constant Five Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 int setConstantSix(String command){
   sensorConstants.sensorSixConstant = command.toFloat();
   publishQueue.publish("Constant Six Value set to ",String(command),PRIVATE);
+  updateConstantValues();
   return 1;
 }
 
 // This function updates the constants value string in the console. 
-void updateThresholdValue()
+void updateConstantValues()
 {   
-    snprintf(sensorOneConstantStr,sizeof(sensorOneConstantStr),"Sensor One Constant : %3.1f", sensorConstants.sensorOneConstant);
-    snprintf(sensorTwoConstantStr,sizeof(sensorTwoConstantStr),"Sensor Two Constant : %3.1f", sensorConstants.sensorTwoConstant);
-    snprintf(sensorThreeConstantStr,sizeof(sensorThreeConstantStr),"Sensor Three Constant : %3.1f", sensorConstants.sensorThreeConstant);
+    snprintf(sensorOneConstantStr,sizeof(sensorOneConstantStr),"CT One: %3.1f", sensorConstants.sensorOneConstant);
+    snprintf(sensorTwoConstantStr,sizeof(sensorTwoConstantStr),"CT Two %3.1f", sensorConstants.sensorTwoConstant);
+    snprintf(sensorThreeConstantStr,sizeof(sensorThreeConstantStr),"CT Three: %3.1f", sensorConstants.sensorThreeConstant);
     snprintf(sensorFourConstantStr,sizeof(sensorFourConstantStr),"Sensor Four Constant : %3.1f", sensorConstants.sensorFourConstant);
     snprintf(sensorFiveConstantStr,sizeof(sensorFiveConstantStr),"Sensor Five Constant : %3.1f", sensorConstants.sensorFiveConstant);
     snprintf(sensorSixConstantStr,sizeof(sensorSixConstantStr),"Sensor Six Constant : %3.1f", sensorConstants.sensorSixConstant);
     constantsStatusWriteNeeded = true;                                                         // This function is called when there is a change so, we need to update the FRAM
 } 
 
-
-
-
+/* 
+  EnableSensor (String Sensor)
+  This function takes in the sensor number as integer and enables or disable the sensor accordingly.
+*/
+int enableSensor(String Sensor){
+  char * pEND;
+  char data[256];
+  int tempSensor = strtol(Sensor,&pEND,10);                                                  // Looks for the first integer and interprets it
+  if ((tempSensor < 1) || (tempSensor >7) ) return 0;
+ 
+  if (tempSensor == 1){
+    sysStatus.sensorOneConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor One");
+    sysStatusWriteNeeded = true;  
+    return 1;     
+  } else if (tempSensor == 2){
+    sysStatus.sensorTwoConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor Two");
+    sysStatusWriteNeeded = true;   
+    return 1;    
+  }
+  else if (tempSensor == 3){
+    sysStatus.sensorThreeConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor Three");
+    sysStatusWriteNeeded = true;       
+    return 1;
+  }
+  else if (tempSensor == 4){
+    sysStatus.sensorFourConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor Four");
+    sysStatusWriteNeeded = true;     
+    return 1;  
+  }
+  else if (tempSensor == 5){
+    sysStatus.sensorFiveConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor Five");
+    sysStatusWriteNeeded = true;    
+    return 1;   
+  }
+  else if (tempSensor == 6){
+    sysStatus.sensorSixConnected = true;
+    snprintf(data, sizeof(data), "Enabled Sensor Six");
+    sysStatusWriteNeeded = true; 
+    return 1;      
+  }
+}
 
 // These are the functions that are part of the takeMeasurements call
 
 bool takeMeasurements() 
 {
-
     sensorData.validData = false;
     
     getBatteryContext();     
 
-    sensorData.sensorOneCurrent =   emon1.calcIrms(1480);
-    sensorData.sensorTwoCurrent =   emon2.calcIrms(1480);
-    sensorData.sensorThreeCurrent=  emon3.calcIrms(1480);
-    sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
-    sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
-    sensorData.sensorSixCurrent =   emon6.calcIrms(1480);
+    if (sysStatus.sensorOneConnected) sensorData.sensorOneCurrent =   emon1.calcIrms(1480);
+    if (sysStatus.sensorTwoConnected) sensorData.sensorTwoCurrent =   emon2.calcIrms(1480);
+    if (sysStatus.sensorThreeConnected) sensorData.sensorThreeCurrent=  emon3.calcIrms(1480);
+    if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
+    if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+    if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);
 
     // Indicate that this is a valid data array and store it
     sensorData.validData = true;
@@ -608,4 +665,8 @@ bool takeMeasurements()
   }
 
 
-  
+  void getBatteryCharge()
+{
+  voltage = analogRead(BATT) * 0.0011224;
+  snprintf(batteryString, sizeof(batteryString), "%3.1f V", voltage);
+}
