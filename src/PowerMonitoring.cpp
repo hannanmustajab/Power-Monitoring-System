@@ -6,16 +6,52 @@
 #line 1 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
 /*
  * Project PowerMonitoring
- * Description:
- * Author:
- * Date:
+ * Description: Remote Monitoring System Kumva 
+ * Author: Abdul Hannan Mustajab
+ * Date: 1 March 2021
  */
+
+/* 
+  Firmware for Kumva Remote Power Monitoring System. Device samples every 10 secs and if there is a change of more than 0.5A, then data will be sent to the cloud. 
+  Else it will send data every 10 minutes. It can be adjusted in "wakeBoundary" and "reportingBoundary" variables.
+
+    * Each Boron has 6 sensors connected over Analog. 
+      * A5 is Connected to CT1
+      * A4 is connected to CT2
+      * A3 is connected to CT3
+      * A2 is connected to CT4
+      * A1 is connected to CT5
+      * A0 is connected to CT6
+   
+    * Particle Functions  
+      * Update the constants values.
+      * Set Operation Mode
+      * Enable or Disable Sensors
+      * Enable or Disable 3rd Party Sim
+      * Set KeepAlive Value
+    
+    * Particle Variables   
+      * Display constants values
+      * Display Battery level
+      * KeepAlive Values
+      * Display Operation Mode
+
+  There are two main operation modes, SINGLE PHASE and MULTI PHASE.
+    * SINGLE PHASE
+      * Very straightforward. Current across each wire is measured and sent to the cloud. EG: AC, Lights, Iron etc.
+      * Current is calculated using emonLib.   
+*/
 
 // v1.00  - First release: Changed to emonLibrary, state machine working fine on argon, 10 seconds publish frequency. 
 // v1.01  - Fixed error state bug, added waituntill particle connect, added functions for changing constant value and showing them in console.
 // v1.02  - Added check in takeMeasurements to send data if sensor is connected. 
 // v1.03 -  Fixed pin chart.
 // v1.04 - Added a particle function to enable sensors from the console.
+// v1.05 - Add particle functions to disable sensors from the console.
+// v1.06 - Moved the code to change based reporting. So it will only report if change is detected. Otherwise send every minute.
+// v1.07 - Testing Three phase code with Prince's Library.
+// v1.08 - Created Particle function to set operation Mode, made changes to takeMeasurements function to check for different operation mode for Three phase load with 3 and 4 Wire.
+
 
 void setup();
 void loop();
@@ -27,24 +63,26 @@ void keepAliveMessage();
 void sendEvent();
 void UbidotsHandler(const char *event, const char *data);
 void blinkLED(int LED);
-int measureNow(String command);
-int setVerboseMode(String command);
 void publishStateTransition(void);
+void getBatteryContext();
 int setThirdPartySim(String command);
 int setKeepAlive(String command);
-void getBatteryContext();
 int setConstantOne(String command);
 int setConstantTwo(String command);
 int setConstantThree(String command);
 int setConstantFour(String command);
 int setConstantFive(String command);
 int setConstantSix(String command);
+int measureNow(String command);
+int setVerboseMode(String command);
 void updateConstantValues();
 int enableSensor(String Sensor);
+int disableSensor(String Sensor);
+int setOperatingMode(String Sensor);
 bool takeMeasurements();
 void getBatteryCharge();
-#line 14 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
-const char releaseNumber[8] = "1.04";                                                      // Displays the release on the menu
+#line 50 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
+const char releaseNumber[8] = "1.08";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -52,6 +90,7 @@ const char releaseNumber[8] = "1.04";                                           
 #include "MB85RC256V-FRAM-RK.h"                                                             // Rickkas Particle based FRAM Library
 #include "MCP79410RK.h"                                                                     // Real Time Clock
 #include "EmonLib.h"                                                                        // Include Emon Library
+#include "AC_MonitorLib.h"                                                                  // Include Load_Monitoring Library
 
 
 // Prototypes and System Mode calls
@@ -63,6 +102,7 @@ MCP79410 rtc;                                                                   
 retained uint8_t publishQueueRetainedBuffer[2048];                                          // Create a buffer in FRAM for cached publishes
 PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
 Timer keepAliveTimer(1000, keepAliveMessage);
+Load_Monitor KUMVA_IO;                                                                       //Create an instance
 
 // Define the memory map - note can be EEPROM or FRAM - moving to FRAM for speed and to avoid memory wear
 namespace FRAM {                                                                            // Moved to namespace instead of #define to limit scope
@@ -75,7 +115,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 9;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 11;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -94,7 +134,7 @@ struct systemStatus_structure {
   bool sensorFourConnected = false;                                                                 // Check if sensor Three is connected.                                   
   bool sensorFiveConnected = false;                                                                 // Check if sensor Three is connected.                                   
   bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.                                   
-  uint8_t operatingMode;                                                                    // Check the operation mode,  
+  uint8_t operatingMode=1;                                                                    // Check the operation mode,  
   /*
     * 1 if single phase mode
     * 2 if three phase mode with 3 wires.
@@ -120,6 +160,27 @@ struct sensor_data_struct {                                                     
   float sensorFourCurrent=0;
   float sensorFiveCurrent=0;
   float sensorSixCurrent=0;
+  
+  float sensorOnePrevious=0;
+  float sensorTwoPrevious=0;
+  float sensorThreePrevious=0;
+  float sensorFourPrevious=0;
+  float sensorFivePrevious=0;
+  float sensorSixPrevious=0;
+
+  // Three phase sensors with 3 wires. Maximum of two such devices can be connected.
+
+  double I_ThreePhaseLoad_One[3]={0};                                                               // Three phase load with 3 Wires.
+  double P_ThreePhaseLoad_One[3]={0};                                                               // Power for three phase load with 3 wires.
+
+  double I_ThreePhaseLoad_Two[3]={0};                                                               // Three phase load with 3 Wires.
+  double P_ThreePhaseLoad_Two[3]={0};                                                               // Power for three phase load with 3 wires.
+
+  // Three Phase sensor with 4 wires. Only one such device can be connected.
+  
+  double Four_ThreePhaseLoad_I[4]={0};                                                               // Three phase load with 4 Wires.
+  double Four_ThreePhaseLoad_P[4]={0};                                                               // Power for three phase load with 4 wires.
+  
   unsigned long timeStamp;
   int stateOfCharge;
   bool validData;
@@ -127,8 +188,8 @@ struct sensor_data_struct {                                                     
 
 
 // State Machine Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, MEASURING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
-char stateNames[8][26] = {"Initialize", "Error", "Idle", "Measuring","Reporting", "Response Wait"};
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, MEASURING_STATE, REPORTING_STATE, REPORTING_DETERMINATION, RESP_WAIT_STATE};
+char stateNames[8][26] = {"Initialize", "Error", "Idle", "Measuring","Reporting","Reporting Determination", "Response Wait"};
 State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
@@ -166,13 +227,12 @@ char batteryString[16];
 bool sysStatusWriteNeeded = false;                                                       // Keep track of when we need to write     
 bool sensorDataWriteNeeded = false; 
 bool constantsStatusWriteNeeded = false;
-float voltage;                                                                             // Battery voltge Argon
-// Variables
-double current_irms             = 0;
-double previous_irms            = 0;
+float voltage;                                                                             // Battery voltage Argon
+double Vrms=220;                                                                          // Standard Utility Voltage , Can be modified for better accuracy
 
 // Time Period Related Variables
 const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
+const int reportingBoundary = 0*3600 + 10*60 + 0;                                                // 0 hour 20 minutes 0 seconds
 
 /************************CT LIBRARY RELATED Instances, Pinouts etc.***********************************/
 
@@ -188,8 +248,42 @@ uint8_t CT6_PIN=A0;
 
 EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6;               // Create an instance
 
+  /*  Examples of 3 phase loads 
+    * a load is a three phase when it use 3 or 4 CTs
+    * is connected to CTx1 (Ax1), CTx2 (Ax2), CTx3 (Ax3), CTx4 (Ax4)
+    * Specifit the CTs used calibration constants
+    * Create a struct as shown below: 
+  */
 
-/*************************************END************************************************************/
+  // Three Phase Load with 3 Wires - Load One
+  Load_Monitor::CT_Property_Struct ThreePhaseLoadOne[3]=
+  {  
+        {CT1_PIN,sensorConstants.sensorOneConstant}, // R phase
+        {CT2_PIN,sensorConstants.sensorTwoConstant}, // T phase
+        {CT3_PIN,sensorConstants.sensorThreeConstant} // S phase 
+  };
+
+  // Three Phase Load with 3 Wires - Load Two
+  Load_Monitor::CT_Property_Struct ThreePhaseLoadTwo[3]=
+  {  
+        {CT4_PIN,sensorConstants.sensorFourConstant}, // R phase
+        {CT5_PIN,sensorConstants.sensorFiveConstant}, // T phase
+        {CT6_PIN,sensorConstants.sensorSixConstant} // S phase 
+  };
+
+  // Three Phase Load with 4 Wires - Load One
+  Load_Monitor::CT_Property_Struct ThreePhaseLoadFourWires[4]={                                 // 4- wires Three phase Load 
+      {CT1_PIN,sensorConstants.sensorOneConstant},                                              // R phase
+      {CT2_PIN,sensorConstants.sensorTwoConstant},                                              // S phase
+      {CT3_PIN,sensorConstants.sensorThreeConstant},                                            // T phase 
+      {CT4_PIN,sensorConstants.sensorFourConstant}                                              // N phase 
+   };
+   
+
+
+
+
+
 
 
 // setup() runs once, when the device is first turned on.
@@ -232,6 +326,8 @@ void setup() {
   Particle.function("Set Constant Five",setConstantFive);
   Particle.function("Set Constant Six",setConstantSix);
   Particle.function("Enable Sensor",enableSensor);                                          // Use this function to enable or disable a sensor from the console.
+  Particle.function("Disable Sensor",disableSensor);                                          // Use this function to disable a sensor from the console.
+  Particle.function("Operating Mode",setOperatingMode);                                          // Use this function to disable a sensor from the console.
 
 
   rtc.setup();                                                        // Start the real time clock
@@ -265,6 +361,8 @@ void setup() {
   emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
   emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
 
+  
+
   if (sysStatus.thirdPartySim) {
     waitFor(Particle.connected,30 * 1000); 
     Particle.keepAlive(sysStatus.keepAlive);                                              // Set the keep alive value
@@ -288,21 +386,28 @@ void loop() {
   case IDLE_STATE:                                                                          // Idle state - brackets only needed if a variable is defined in a state    
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
 
-    if (!(Time.now() % wakeBoundary)) state = MEASURING_STATE;                                                     
+    if (!(Time.now() % wakeBoundary)) state = REPORTING_DETERMINATION;                                                     
+    
+    break;
+
+  case REPORTING_DETERMINATION:
+    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
+    // Case One:
+    if (takeMeasurements()) state = REPORTING_STATE;
+    // Case Two:
+    else if (!(Time.now() % reportingBoundary)) state = MEASURING_STATE;
+    // Go back to IDLE
+    else state = IDLE_STATE;
     
     break;
 
   case MEASURING_STATE:                                                                     // Take measurements prior to sending
+    
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
-    if (!takeMeasurements())
-    {
-      state = IDLE_STATE;
-    }
-    else {
-      state = REPORTING_STATE;
-      // previous_irms = current_irms;
-    }
-    break;
+    takeMeasurements();
+    state = REPORTING_STATE;
+   
+   break;
 
   case REPORTING_STATE: 
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
@@ -413,10 +518,26 @@ void keepAliveMessage() {
 void sendEvent()
 {
   char data[512];                 
-  snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+  if (sysStatus.operatingMode == 1){
+    snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"ThreePhaseR\":%4.1f,\"ThreePhaseS\":%4.1f,\"ThreePhaseT\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+  } else if (sysStatus.operatingMode == 2){
+    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorTwoR\":%4.1f,  \"sensorTwoS\":%4.1f,\"sensorTwoT\":%4.1f,\"Mode\":2}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.I_ThreePhaseLoad_Two[0],sensorData.I_ThreePhaseLoad_Two[1],sensorData.I_ThreePhaseLoad_Two[2]);
+  }else if (sysStatus.operatingMode == 3){
+    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":3}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+  }else if (sysStatus.operatingMode == 4){
+    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"SensorOneN\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":4}", sensorData.Four_ThreePhaseLoad_I[0] ,sensorData.Four_ThreePhaseLoad_I[1],sensorData.Four_ThreePhaseLoad_I[2],sensorData.Four_ThreePhaseLoad_I[3],sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+  }
   publishQueue.publish("powermonitoring_hook", data, PRIVATE);
+  // Update the previous sensor values.
+  sensorData.sensorOnePrevious = sensorData.sensorOneCurrent;
+  sensorData.sensorTwoPrevious = sensorData.sensorTwoCurrent;
+  sensorData.sensorThreePrevious = sensorData.sensorThreeCurrent;
+  sensorData.sensorFourPrevious = sensorData.sensorFourCurrent;
+  sensorData.sensorFivePrevious = sensorData.sensorFiveCurrent;
+  sensorData.sensorSixPrevious = sensorData.sensorSixCurrent;
   dataInFlight = true;                                                                      // set the data inflight flag
   webhookTimeStamp = millis();
+
 }
 
 void UbidotsHandler(const char *event, const char *data) {            // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -454,34 +575,6 @@ void blinkLED(int LED)                                                          
 // and to allow for management.
 
 
-int measureNow(String command) // Function to force sending data in current hour
-{
-  if (command == "1") {
-    state = MEASURING_STATE;
-    return 1;
-  }
-  else return 0;
-}
-
-int setVerboseMode(String command) // Function to force sending data in current hour
-{
-  if (command == "1")
-  {
-    sysStatus.verboseMode = true;
-    publishQueue.publish("Mode","Set Verbose Mode",PRIVATE);
-    sysStatusWriteNeeded = true;
-    return 1;
-  }
-  else if (command == "0")
-  {
-    sysStatus.verboseMode = false;
-    publishQueue.publish("Mode","Cleared Verbose Mode",PRIVATE);
-    sysStatusWriteNeeded = true;
-    return 1;
-  }
-  else return 0;
-}
-
 void publishStateTransition(void)
 {
   char stateTransitionString[40];
@@ -489,6 +582,21 @@ void publishStateTransition(void)
   oldState = state;
   if(Particle.connected()) publishQueue.publish("State Transition",stateTransitionString, PRIVATE);
 }
+
+void getBatteryContext() 
+{
+  const char* batteryContext[7] ={"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
+  // Battery conect information - https://docs.particle.io/reference/device-os/firmware/boron/#batterystate-
+  // sysStatus.batteryState = System.batteryState();
+  snprintf(batteryContextStr, sizeof(batteryContextStr),"%s", batteryContext[sysStatus.batteryState]);
+  sysStatusWriteNeeded = true;
+}
+
+/*
+  * These functions change the values of the constant. 
+*/
+
+// This section contains all the Particle Functions which can be operated in the console. 
 
 int setThirdPartySim(String command) // Function to force sending data in current hour
 {
@@ -526,20 +634,7 @@ int setKeepAlive(String command)
   return 1;
 }
 
-void getBatteryContext() 
-{
-  const char* batteryContext[7] ={"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
-  // Battery conect information - https://docs.particle.io/reference/device-os/firmware/boron/#batterystate-
-  // sysStatus.batteryState = System.batteryState();
-  snprintf(batteryContextStr, sizeof(batteryContextStr),"%s", batteryContext[sysStatus.batteryState]);
-  sysStatusWriteNeeded = true;
-}
 
-/*
-  * These functions change the values of the constant. 
-*/
-
-// Function Prototypes
 int setConstantOne(String command){
   sensorConstants.sensorOneConstant = command.toFloat();
   publishQueue.publish("Constant One Value set to ",String(command),PRIVATE);
@@ -582,7 +677,36 @@ int setConstantSix(String command){
   return 1;
 }
 
-// This function updates the constants value string in the console. 
+
+int measureNow(String command) // Function to force sending data in current hour
+{
+  if (command == "1") {
+    state = MEASURING_STATE;
+    return 1;
+  }
+  else return 0;
+}
+
+int setVerboseMode(String command) // Function to force sending data in current hour
+{
+  if (command == "1")
+  {
+    sysStatus.verboseMode = true;
+    publishQueue.publish("Mode","Set Verbose Mode",PRIVATE);
+    sysStatusWriteNeeded = true;
+    return 1;
+  }
+  else if (command == "0")
+  {
+    sysStatus.verboseMode = false;
+    publishQueue.publish("Mode","Cleared Verbose Mode",PRIVATE);
+    sysStatusWriteNeeded = true;
+    return 1;
+  }
+  else return 0;
+}
+
+
 void updateConstantValues()
 {   
     snprintf(sensorOneConstantStr,sizeof(sensorOneConstantStr),"CT One: %3.1f", sensorConstants.sensorOneConstant);
@@ -641,6 +765,89 @@ int enableSensor(String Sensor){
   }
 }
 
+/* 
+  EnableSensor (String Sensor)
+  This function takes in the sensor number as integer and enables or disable the sensor accordingly.
+*/
+int disableSensor(String Sensor){
+  char * pEND;
+  char data[256];
+  int tempSensor = strtol(Sensor,&pEND,10);                                                  // Looks for the first integer and interprets it
+  if ((tempSensor < 1) || (tempSensor >7) ) return 0;
+ 
+  if (tempSensor == 1){
+    sysStatus.sensorOneConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor One");
+    sysStatusWriteNeeded = true;  
+    return 1;     
+  } else if (tempSensor == 2){
+    sysStatus.sensorTwoConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor Two");
+    sysStatusWriteNeeded = true;   
+    return 1;    
+  }
+  else if (tempSensor == 3){
+    sysStatus.sensorThreeConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor Three");
+    sysStatusWriteNeeded = true;       
+    return 1;
+  }
+  else if (tempSensor == 4){
+    sysStatus.sensorFourConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor Four");
+    sysStatusWriteNeeded = true;     
+    return 1;  
+  }
+  else if (tempSensor == 5){
+    sysStatus.sensorFiveConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor Five");
+    sysStatusWriteNeeded = true;    
+    return 1;   
+  }
+  else if (tempSensor == 6){
+    sysStatus.sensorSixConnected = false;
+    snprintf(data, sizeof(data), "Disabled Sensor Six");
+    sysStatusWriteNeeded = true; 
+    return 1;      
+  }
+}
+
+int setOperatingMode(String Sensor){
+  char * pEND;
+  char data[256];
+  int tempSensor = strtol(Sensor,&pEND,10);                                                  // Looks for the first integer and interprets it
+  if ((tempSensor < 0) || (tempSensor >4) ) return 0;
+  else{
+    sysStatus.operatingMode = tempSensor;
+    snprintf(data, sizeof(data), "Operation Mode %i",tempSensor);
+    publishQueue.publish("Mode",data,PRIVATE);
+    sysStatusWriteNeeded = true;  
+    return 1; 
+  }
+}
+
+//---------------------------------------------------------------------------------------------Three Phase
+
+// Wires=3 for 3-Wires: R,S,T
+// Wires=4 for 4 wires: R,S,T and N
+
+void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Name[],double *Current_rms_per_Phase,double *Power_rms_per_Phase){
+   uint8_t p=0;
+   p=Wires;
+   double i_rms_per_Phase[p]={0};
+   
+  for (uint8_t i=0;i<p;i++){
+
+   i_rms_per_Phase[i]=KUMVA_IO.calcIrms(Load_Name[i]);
+  
+  Current_rms_per_Phase[i]=i_rms_per_Phase[i];
+  Power_rms_per_Phase[i]=((i_rms_per_Phase[i]*Vrms)/1000); //in kW
+    
+  }
+  
+}
+
+
 // These are the functions that are part of the takeMeasurements call
 
 bool takeMeasurements() 
@@ -648,20 +855,50 @@ bool takeMeasurements()
     sensorData.validData = false;
     
     getBatteryContext();     
+    
+    // If operatingMode is '1'. All single phase
+    if ((sysStatus.operatingMode) == 1){
+      if (sysStatus.sensorOneConnected) sensorData.sensorOneCurrent =   emon1.calcIrms(1480);
+      if (sysStatus.sensorTwoConnected) sensorData.sensorTwoCurrent =   emon2.calcIrms(1480);
+      if (sysStatus.sensorThreeConnected) sensorData.sensorThreeCurrent=  emon3.calcIrms(1480);
+      if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
+      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+      if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);
+    } 
+    // OperatingMode 2 means all 6 sensors enabled with Three phase mode. CT1 to CT3 Load A and CT4 to CT6 load B.
+    else if ((sysStatus.operatingMode) == 2){
+      // Load One
+      Three_Phase_Monitor(3,ThreePhaseLoadOne,sensorData.I_ThreePhaseLoad_One,sensorData.P_ThreePhaseLoad_One);
+      // Load Two 
+      Three_Phase_Monitor(3,ThreePhaseLoadTwo,sensorData.I_ThreePhaseLoad_Two,sensorData.P_ThreePhaseLoad_Two);
+    }
+    // In operation mode 3 of the three wire load, CT1 to CT 3 are load A and CT4 to CT6 are available for single phase operation.
+    else if (sysStatus.operatingMode == 3){
+      // Load for three phase with 3 Wires.
+      Three_Phase_Monitor(3,ThreePhaseLoadOne,sensorData.I_ThreePhaseLoad_One,sensorData.P_ThreePhaseLoad_One);
+      
+      // CT4 to CT6 are available for single phase operation.
+      if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
+      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+      if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);  
+    }
+    // In operation mode 4, The load is of 4 wires. CT1 to CT 4 are load A and CT5 to CT6 are available for single phase operation.
+    else if (sysStatus.operatingMode == 4){
+      // Load for three phase with 3 Wires.
+      Three_Phase_Monitor(4,ThreePhaseLoadFourWires,sensorData.Four_ThreePhaseLoad_I,sensorData.Four_ThreePhaseLoad_P);
+      
+      // CT5 & CT6 are available for single phase operation.
+      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+      if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);  
+    }
 
-    if (sysStatus.sensorOneConnected) sensorData.sensorOneCurrent =   emon1.calcIrms(1480);
-    if (sysStatus.sensorTwoConnected) sensorData.sensorTwoCurrent =   emon2.calcIrms(1480);
-    if (sysStatus.sensorThreeConnected) sensorData.sensorThreeCurrent=  emon3.calcIrms(1480);
-    if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
-    if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
-    if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);
-
-    // Indicate that this is a valid data array and store it
-    sensorData.validData = true;
-    sensorData.timeStamp = Time.now();
-    sensorDataWriteNeeded = true;
-    return 1;
-
+    if (((abs(sensorData.sensorOneCurrent)-(sensorData.sensorOnePrevious)) >= 0.5) || ((abs(sensorData.sensorTwoCurrent)-(sensorData.sensorTwoPrevious)) >= 0.5) || ((abs(sensorData.sensorThreeCurrent)-(sensorData.sensorThreePrevious)) >= 0.5) || ((abs(sensorData.sensorFourCurrent)-(sensorData.sensorFourPrevious)) >= 0.5) || ((abs(sensorData.sensorFiveCurrent)-(sensorData.sensorFivePrevious)) >= 0.5) || ((abs(sensorData.sensorSixCurrent)-(sensorData.sensorSixPrevious)) >= 0.5)) {
+      // Indicate that this is a valid data array and store it
+      sensorData.validData = true;
+      sensorData.timeStamp = Time.now();
+      sensorDataWriteNeeded = true;
+      return 1;
+      } else return 0;
   }
 
 
