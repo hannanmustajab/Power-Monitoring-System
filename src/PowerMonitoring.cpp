@@ -29,6 +29,7 @@
       * Enable or Disable Sensors
       * Enable or Disable 3rd Party Sim
       * Set KeepAlive Value
+      * Set reporting duration. (0 hour 20 minutes 0 seconds) -> Enter value in seconds. [20 Minutes => 20*60]
     
     * Particle Variables   
       * Display constants values
@@ -51,7 +52,9 @@
 // v1.06 - Moved the code to change based reporting. So it will only report if change is detected. Otherwise send every minute.
 // v1.07 - Testing Three phase code with Prince's Library.
 // v1.08 - Created Particle function to set operation Mode, made changes to takeMeasurements function to check for different operation mode for Three phase load with 3 and 4 Wire.
-
+// v1.09 - Fixed sendEvent bug.
+// v1.10 - Fixed minor bugs reported by Chip.
+// v1.11 - Added function and variable to manage reporting duration.
 
 void setup();
 void loop();
@@ -73,6 +76,7 @@ int setConstantThree(String command);
 int setConstantFour(String command);
 int setConstantFive(String command);
 int setConstantSix(String command);
+int setReportingDuration(String command);
 int measureNow(String command);
 int setVerboseMode(String command);
 void updateConstantValues();
@@ -81,8 +85,8 @@ int disableSensor(String Sensor);
 int setOperatingMode(String Sensor);
 bool takeMeasurements();
 void getBatteryCharge();
-#line 50 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
-const char releaseNumber[8] = "1.08";                                                      // Displays the release on the menu
+#line 53 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
+const char releaseNumber[8] = "1.10";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -115,7 +119,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 11;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 12;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -124,17 +128,19 @@ struct systemStatus_structure {
   uint8_t connectedStatus;
   uint8_t verboseMode;
   uint8_t lowBatteryMode;
-  int stateOfCharge;                                                                        // Battery charge level
-  uint8_t batteryState;                                                                     // Stores the current battery state
-  int resetCount;                                                                           // reset count of device (0-256)
-  unsigned long lastHookResponse;                                                           // Last time we got a valid Webhook response
-  bool sensorOneConnected = true;                                                                  // Check if sensor One is connected.                                   
+  int stateOfCharge;                                                                                // Battery charge level
+  uint8_t batteryState;                                                                             // Stores the current battery state
+  int resetCount;                                                                                   // reset count of device (0-256)
+  unsigned long lastHookResponse;                                                                   // Last time we got a valid Webhook response
+  bool sensorOneConnected = true;                                                                   // Check if sensor One is connected.                                   
   bool sensorTwoConnected = false;                                                                  // Check if sensor Two is connected.                                   
   bool sensorThreeConnected = false;                                                                // Check if sensor Three is connected.                                   
   bool sensorFourConnected = false;                                                                 // Check if sensor Three is connected.                                   
   bool sensorFiveConnected = false;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.                                   
-  uint8_t operatingMode=1;                                                                    // Check the operation mode,  
+  bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.     
+  int reportingBoundary = 0*3600 + 10*60 + 0;                                                       // 0 hour 20 minutes 0 seconds
+
+  uint8_t operatingMode=1;                                                                          // Check the operation mode,  
   /*
     * 1 if single phase mode
     * 2 if three phase mode with 3 wires.
@@ -232,7 +238,6 @@ double Vrms=220;                                                                
 
 // Time Period Related Variables
 const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
-const int reportingBoundary = 0*3600 + 10*60 + 0;                                                // 0 hour 20 minutes 0 seconds
 
 /************************CT LIBRARY RELATED Instances, Pinouts etc.***********************************/
 
@@ -314,6 +319,9 @@ void setup() {
   Particle.variable("Constant Five", sensorConstants.sensorFiveConstant);
   Particle.variable("Constant Six", sensorConstants.sensorSixConstant);
 
+  Particle.variable("Reporting Duration",sysStatus.reportingBoundary);
+  Particle.variable("Operation Mode",sysStatus.operatingMode);
+
 
   Particle.function("Measure-Now",measureNow);
   Particle.function("Verbose-Mode",setVerboseMode);
@@ -328,7 +336,7 @@ void setup() {
   Particle.function("Enable Sensor",enableSensor);                                          // Use this function to enable or disable a sensor from the console.
   Particle.function("Disable Sensor",disableSensor);                                          // Use this function to disable a sensor from the console.
   Particle.function("Operating Mode",setOperatingMode);                                          // Use this function to disable a sensor from the console.
-
+  Particle.function("Reporting Duration(MINUTES)",setReportingDuration);                                   // Set reporting duration from the console, (IN MINUTES.)
 
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
@@ -377,7 +385,6 @@ void setup() {
 
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;                                    // We made it throughgo let's go to idle
   
-  publishQueue.publish("DEBUG- Startup",stateNames[state],PRIVATE);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
@@ -395,7 +402,7 @@ void loop() {
     // Case One:
     if (takeMeasurements()) state = REPORTING_STATE;
     // Case Two:
-    else if (!(Time.now() % reportingBoundary)) state = MEASURING_STATE;
+    else if (!(Time.now() % sysStatus.reportingBoundary)) state = MEASURING_STATE;
     // Go back to IDLE
     else state = IDLE_STATE;
     
@@ -413,14 +420,13 @@ void loop() {
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
     if (Particle.connected()) {
       if (Time.hour() == 12) Particle.syncTime();                                           // Set the clock each day at noon
-      takeMeasurements();
+      // takeMeasurements();
       sendEvent();                                                                          // Send data to Ubidots
       state = RESP_WAIT_STATE;                                                              // Wait for Response
     }
     else {
-      publishQueue.publish("DEBUG- Startup","ERROR FROM REPORTING",PRIVATE);
-      publishQueue.publish("DEBUG- PARTICLE CONNECTED",String(Particle.connected()),PRIVATE);
-      state = ERROR_STATE;
+      Particle.connect();
+      state = IDLE_STATE;
       resetTimeStamp = millis();
     }
     break;
@@ -428,7 +434,7 @@ void loop() {
   case RESP_WAIT_STATE:
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
 
-    if (!dataInFlight && (Time.now() % wakeBoundary))                                       // Response received back to IDLE state - make sure we don't allow repetivie reporting events
+    if (!dataInFlight && !(Time.now() % wakeBoundary))                                       // Response received back to IDLE state - make sure we don't allow repetivie reporting events
     {
      state = IDLE_STATE;
     }
@@ -481,6 +487,8 @@ void loadSystemDefaults() {                                                     
   sysStatus.structuresVersion = 1;
   sysStatus.verboseMode = false;
   sysStatus.lowBatteryMode = false;
+  sysStatus.reportingBoundary = 10*60;
+  sysStatus.operatingMode = 1;
   fram.put(FRAM::sysStatusAddr,sysStatus);                                                  // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -519,7 +527,7 @@ void sendEvent()
 {
   char data[512];                 
   if (sysStatus.operatingMode == 1){
-    snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"ThreePhaseR\":%4.1f,\"ThreePhaseS\":%4.1f,\"ThreePhaseT\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+    snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
   } else if (sysStatus.operatingMode == 2){
     snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorTwoR\":%4.1f,  \"sensorTwoS\":%4.1f,\"sensorTwoT\":%4.1f,\"Mode\":2}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.I_ThreePhaseLoad_Two[0],sensorData.I_ThreePhaseLoad_Two[1],sensorData.I_ThreePhaseLoad_Two[2]);
   }else if (sysStatus.operatingMode == 3){
@@ -537,7 +545,6 @@ void sendEvent()
   sensorData.sensorSixPrevious = sensorData.sensorSixCurrent;
   dataInFlight = true;                                                                      // set the data inflight flag
   webhookTimeStamp = millis();
-
 }
 
 void UbidotsHandler(const char *event, const char *data) {            // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -677,6 +684,13 @@ int setConstantSix(String command){
   return 1;
 }
 
+// This function is used to update the reportingDuration. 
+int setReportingDuration(String command){
+  sysStatus.reportingBoundary = command.toFloat();
+  publishQueue.publish("Reporting Time Set to %s Minutes.",String(command),PRIVATE);
+  sysStatusWriteNeeded = true;
+  return 1;
+}
 
 int measureNow(String command) // Function to force sending data in current hour
 {
@@ -904,6 +918,7 @@ bool takeMeasurements()
 
   void getBatteryCharge()
 {
-  voltage = analogRead(BATT) * 0.0011224;
-  snprintf(batteryString, sizeof(batteryString), "%3.1f V", voltage);
+  // voltage = analogRead(BATT) * 0.0011224;
+  // snprintf(batteryString, sizeof(batteryString), "%3.1f V", voltage);
 }
+

@@ -5,5 +5,5 @@
     "files.associations": {
         "*.ino": "cpp"
     },
-    "particle.targetPlatform": "argon"
+    "particle.targetPlatform": "boron"
 }
