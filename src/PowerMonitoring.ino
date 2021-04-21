@@ -34,7 +34,13 @@
   There are two main operation modes, SINGLE PHASE and MULTI PHASE.
     * SINGLE PHASE
       * Very straightforward. Current across each wire is measured and sent to the cloud. EG: AC, Lights, Iron etc.
-      * Current is calculated using emonLib.   
+      * Current is calculated using emonLib.  
+
+  Constant Values 
+    * For 100A | 0.05A and 22ohms resistors -> (100/0.05) / 22 = 90.91
+    * For 200A | 0.3A and 20 ohms -> (200/0.3)/20 = 33.3
+    * For 400A | 0.33A and 10 ohms -> (400/0.33)/10 = 121
+    * For 600A | 
 */
 
 // v1.00  - First release: Changed to emonLibrary, state machine working fine on argon, 10 seconds publish frequency. 
@@ -49,10 +55,16 @@
 // v1.09 - Fixed sendEvent bug.
 // v1.10 - Fixed minor bugs reported by Chip.
 // v1.11 - Added function and variable to manage reporting duration.
-// v1.12 - Updated code for boron.
+// v2.00 - Updated code for boron and stable release.
+// v3.00 - Fixed operating mode. 
+// v4.00 - Changed from 10BIT to 12BIT operations.
 
 
-const char releaseNumber[8] = "1.12";                                                      // Displays the release on the menu
+
+PRODUCT_ID(11734);
+PRODUCT_VERSION(4); 
+
+const char releaseNumber[8] = "4.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -85,7 +97,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 12;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 13;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -106,7 +118,7 @@ struct systemStatus_structure {
   bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.     
   int reportingBoundary = 0*3600 + 10*60 + 0;                                                       // 0 hour 20 minutes 0 seconds
 
-  uint8_t operatingMode=1;                                                                          // Check the operation mode,  
+  int operatingMode=1;                                                                              // Check the operation mode,  
   /*
     * 1 if single phase mode
     * 2 if three phase mode with 3 wires.
@@ -468,6 +480,7 @@ void checkSystemValues() {                                                      
   if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = true;
   if (sysStatus.lowBatteryMode < 0 || sysStatus.lowBatteryMode > 1) sysStatus.lowBatteryMode = 0;
   if (sysStatus.resetCount < 0 || sysStatus.resetCount > 255) sysStatus.resetCount = 0;
+  if (sysStatus.operatingMode<0 || sysStatus.operatingMode>5) sysStatus.operatingMode = 1;
   sysStatusWriteNeeded = true;
 }
 
