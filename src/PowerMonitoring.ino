@@ -110,13 +110,13 @@ struct systemStatus_structure {
   uint8_t batteryState;                                                                             // Stores the current battery state
   int resetCount;                                                                                   // reset count of device (0-256)
   unsigned long lastHookResponse;                                                                   // Last time we got a valid Webhook response
-  bool sensorOneConnected = true;                                                                   // Check if sensor One is connected.                                   
-  bool sensorTwoConnected = false;                                                                  // Check if sensor Two is connected.                                   
-  bool sensorThreeConnected = false;                                                                // Check if sensor Three is connected.                                   
-  bool sensorFourConnected = false;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorFiveConnected = false;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorSixConnected = false;                                                                  // Check if sensor Three is connected.     
-  int reportingBoundary = 0*3600 + 10*60 + 0;                                                       // 0 hour 20 minutes 0 seconds
+  bool sensorOneConnected;                                                                   // Check if sensor One is connected.                                   
+  bool sensorTwoConnected;                                                                  // Check if sensor Two is connected.                                   
+  bool sensorThreeConnected;;                                                                // Check if sensor Three is connected.                                   
+  bool sensorFourConnected;                                                                 // Check if sensor Three is connected.                                   
+  bool sensorFiveConnected;                                                                 // Check if sensor Three is connected.                                   
+  bool sensorSixConnected;                                                                  // Check if sensor Three is connected.     
+  int reportingBoundary;                                                       // 0 hour 20 minutes 0 seconds
 
   int operatingMode=1;                                                                              // Check the operation mode,  
   /*
@@ -129,12 +129,12 @@ struct systemStatus_structure {
 } sysStatus;
 
 struct sensor_constants{
-   double sensorOneConstant = 90.91;
-   double sensorTwoConstant = 90.91;
-   double sensorThreeConstant = 90.91;
-   double sensorFourConstant = 90.91;
-   double sensorFiveConstant = 90.91;
-   double sensorSixConstant = 90.91;
+   double sensorOneConstant;
+   double sensorTwoConstant;
+   double sensorThreeConstant;
+   double sensorFourConstant;
+   double sensorFiveConstant;
+   double sensorSixConstant;
 } sensorConstants;
 
 struct sensor_data_struct {                                                               // Here we define the structure for collecting and storing data from the sensors
