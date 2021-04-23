@@ -60,12 +60,13 @@
 // v4.00 - Changed from 10BIT to 12BIT operations.
 // v5.00 - Test loading sensor constants from the function.
 // v6.00 - Changed FRAM Settings. 
+// v8.00 - Added get data usage function. 
 
 
 PRODUCT_ID(11734);
-PRODUCT_VERSION(6); 
+PRODUCT_VERSION(9); 
 
-const char releaseNumber[8] = "6.00";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "9.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -92,13 +93,12 @@ namespace FRAM {                                                                
   enum Addresses {
     versionAddr           = 0x00,                                                           // Where we store the memory map version number - 8 Bits
     sysStatusAddr         = 0x01,                                                           // This is the status of the device
-    alertStatusAddr       = 0x50,                                                           // Where we store the status of the alerts in the system
-    sensorDataAddr        = 0xA0,                                                           // Where we store the latest sensor data readings
-    sensorConstantsAddr   = 0xF0                                                            // Where we store CT sensor constant values.
+    sensorDataAddr        = 0x200,                                                           // Where we store the latest sensor data readings
+    sensorConstantsAddr   = 0xA0                                                            // Where we store CT sensor constant values.
    };
 };
 
-const int FRAMversionNumber = 14;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 17;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -130,12 +130,12 @@ struct systemStatus_structure {
 } sysStatus;
 
 struct sensor_constants{
-   double sensorOneConstant;
-   double sensorTwoConstant;
-   double sensorThreeConstant;
-   double sensorFourConstant;
-   double sensorFiveConstant;
-   double sensorSixConstant;
+   float sensorOneConstant;
+   float sensorTwoConstant;
+   float sensorThreeConstant;
+   float sensorFourConstant;
+   float sensorFiveConstant;
+   float sensorSixConstant;
 } sensorConstants;
 
 struct sensor_data_struct {                                                               // Here we define the structure for collecting and storing data from the sensors
@@ -155,16 +155,16 @@ struct sensor_data_struct {                                                     
 
   // Three phase sensors with 3 wires. Maximum of two such devices can be connected.
 
-  double I_ThreePhaseLoad_One[3]={0};                                                               // Three phase load with 3 Wires.
-  double P_ThreePhaseLoad_One[3]={0};                                                               // Power for three phase load with 3 wires.
+  float I_ThreePhaseLoad_One[3]={0};                                                               // Three phase load with 3 Wires.
+  float P_ThreePhaseLoad_One[3]={0};                                                               // Power for three phase load with 3 wires.
 
-  double I_ThreePhaseLoad_Two[3]={0};                                                               // Three phase load with 3 Wires.
-  double P_ThreePhaseLoad_Two[3]={0};                                                               // Power for three phase load with 3 wires.
+  float I_ThreePhaseLoad_Two[3]={0};                                                               // Three phase load with 3 Wires.
+  float P_ThreePhaseLoad_Two[3]={0};                                                               // Power for three phase load with 3 wires.
 
   // Three Phase sensor with 4 wires. Only one such device can be connected.
   
-  double Four_ThreePhaseLoad_I[4]={0};                                                               // Three phase load with 4 Wires.
-  double Four_ThreePhaseLoad_P[4]={0};                                                               // Power for three phase load with 4 wires.
+  float Four_ThreePhaseLoad_I[4]={0};                                                               // Three phase load with 4 Wires.
+  float Four_ThreePhaseLoad_P[4]={0};                                                               // Power for three phase load with 4 wires.
   
   unsigned long timeStamp;
   int stateOfCharge;
@@ -201,12 +201,12 @@ char humidityString[16];
 char batteryContextStr[16];                                                                 // One word that describes whether the device is getting power, charging, discharging or too cold to charge
 
 // Constant Values to be printed in console.
-char sensorOneConstantStr[16];                                                                      // String for Sensor One Constant Value
-char sensorTwoConstantStr[16];
-char sensorThreeConstantStr[16];
-char sensorFourConstantStr[16];
-char sensorFiveConstantStr[16];
-char sensorSixConstantStr[16];
+char sensorOneConstantStr[32];                                                                      // String for Sensor One Constant Value
+char sensorTwoConstantStr[32];
+char sensorThreeConstantStr[32];
+char sensorFourConstantStr[32];
+char sensorFiveConstantStr[32];
+char sensorSixConstantStr[32];
 char batteryString[16];
 
 bool sysStatusWriteNeeded = false;                                                       // Keep track of when we need to write     
@@ -310,6 +310,7 @@ void setup() {
   Particle.function("Operating Mode",setOperatingMode);                                          // Use this function to disable a sensor from the console.
   Particle.function("Reporting Duration(MINUTES)",setReportingDuration);                                   // Set reporting duration from the console, (IN MINUTES.)
   Particle.function("Reboot Device",resetSystem);
+
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
 
@@ -336,17 +337,6 @@ void setup() {
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
   loadEmonlib();
-
-  /*
-  // Initialize all emon instances and sensors.
-  emon1.current(CT1_PIN,sensorConstants.sensorOneConstant);
-  emon2.current(CT2_PIN,sensorConstants.sensorTwoConstant);
-  emon3.current(CT3_PIN,sensorConstants.sensorThreeConstant);
-  emon4.current(CT4_PIN,sensorConstants.sensorFourConstant);
-  emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
-  emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
-  */
-
   
 
   if (sysStatus.thirdPartySim) {
@@ -460,7 +450,7 @@ void loop() {
 
 void loadSystemDefaults() {                                                                 // Default settings for the device - connected, not-low power and always on
   if (Particle.connected()) publishQueue.publish("Mode","Loading System Defaults", PRIVATE);
-  sysStatus.thirdPartySim = 0;
+  sysStatus.thirdPartySim = 1;
   sysStatus.keepAlive = 120;
   sysStatus.structuresVersion = 1;
   sysStatus.verboseMode = false;
@@ -633,7 +623,6 @@ int setKeepAlive(String command)
 
 int setConstantOne(String command){
   sensorConstants.sensorOneConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant One Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -641,7 +630,6 @@ int setConstantOne(String command){
 
 int setConstantTwo(String command){
   sensorConstants.sensorTwoConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Two Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -649,7 +637,6 @@ int setConstantTwo(String command){
 
 int setConstantThree(String command){
   sensorConstants.sensorThreeConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Three Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -657,7 +644,6 @@ int setConstantThree(String command){
 
 int setConstantFour(String command){
   sensorConstants.sensorFourConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Four Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -665,7 +651,6 @@ int setConstantFour(String command){
 
 int setConstantFive(String command){
   sensorConstants.sensorFiveConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Five Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -673,7 +658,6 @@ int setConstantFive(String command){
 
 int setConstantSix(String command){
   sensorConstants.sensorSixConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Six Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -847,10 +831,10 @@ int setOperatingMode(String Sensor){
 // Wires=3 for 3-Wires: R,S,T
 // Wires=4 for 4 wires: R,S,T and N
 
-void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Name[],double *Current_rms_per_Phase,double *Power_rms_per_Phase){
+void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Name[],float *Current_rms_per_Phase,float *Power_rms_per_Phase){
    uint8_t p=0;
    p=Wires;
-   double i_rms_per_Phase[p]={0};
+   float i_rms_per_Phase[p]={0};
    
   for (uint8_t i=0;i<p;i++){
 
@@ -869,7 +853,6 @@ void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Nam
 bool takeMeasurements() 
 {
     sensorData.validData = false;
-    loadEmonlib();
     getBatteryContext();     
     
     // If operatingMode is '1'. All single phase
@@ -932,12 +915,12 @@ void loadEmonlib(){
   emon4.current(CT4_PIN,sensorConstants.sensorFourConstant);
   emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
   emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
+  constantsStatusWriteNeeded = true;
 
 }
 
 int resetSystem(String Command){
   char * pEND;
-  char data[256];
   int command = strtol(Command,&pEND,10);                                                  // Looks for the first integer and interprets it
   if (command == 1) {
     System.reset();
