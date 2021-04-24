@@ -74,6 +74,7 @@ void loop();
 void loadSystemDefaults();
 void loadConstantDefaults();
 void checkSystemValues();
+void checkConstantValues();
 void watchdogISR();
 void petWatchdog();
 void keepAliveMessage();
@@ -103,9 +104,9 @@ void loadEmonlib();
 int resetSystem(String Command);
 #line 66 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
 PRODUCT_ID(11734);
-PRODUCT_VERSION(8); 
+PRODUCT_VERSION(9); 
 
-const char releaseNumber[8] = "8.00";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "9.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -137,7 +138,7 @@ namespace FRAM {                                                                
    };
 };
 
-const int FRAMversionNumber = 17;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 22;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -269,7 +270,7 @@ uint8_t CT6_PIN=A0;
 
 // Initialize the emon library.
 
-EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6;               // Create an instance
+EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6, emon[6];               // Create an instance
 
   /*  Examples of 3 phase loads 
     * a load is a three phase when it use 3 or 4 CTs
@@ -279,11 +280,10 @@ EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6;               // Create an in
   */
 
   // Three Phase Load with 3 Wires - Load One
-  Load_Monitor::CT_Property_Struct ThreePhaseLoadOne[3]=
-  {  
-        {CT1_PIN,sensorConstants.sensorOneConstant}, // R phase
-        {CT2_PIN,sensorConstants.sensorTwoConstant}, // T phase
-        {CT3_PIN,sensorConstants.sensorThreeConstant} // S phase 
+  Load_Monitor::CT_Property_Struct ThreePhaseLoadOne[3] = {
+    {CT1_PIN,sensorConstants.sensorOneConstant}, // R phase
+    {CT2_PIN,sensorConstants.sensorTwoConstant}, // T phase
+    {CT3_PIN,sensorConstants.sensorThreeConstant} // S phase 
   };
 
   // Three Phase Load with 3 Wires - Load Two
@@ -364,15 +364,18 @@ void setup() {
     fram.get(FRAM::versionAddr, tempVersion);                                               // See if this worked
     if (tempVersion != FRAMversionNumber) state = ERROR_STATE;                              // Device will not work without FRAM
     else {
+      publishQueue.publish("Loading Defaults","Setup Loop",PRIVATE);
       loadSystemDefaults();                                                                 // Out of the box, we need the device to be awake and connected
       loadConstantDefaults();
     }
   }
   else {
+    publishQueue.publish("Loading From FRAM","Setup Loop",PRIVATE);
     fram.get(FRAM::sensorConstantsAddr,sensorConstants);
     fram.get(FRAM::sysStatusAddr,sysStatus);                                                // Loads the System Status array from FRAM
   }
 
+  checkConstantValues();
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
   loadEmonlib();
@@ -384,7 +387,9 @@ void setup() {
     keepAliveTimer.changePeriod(sysStatus.keepAlive*1000);                                  // Will start the repeating timer
   }
 
+  updateConstantValues();
   takeMeasurements();                                                                       // For the benefit of monitoring the device
+
 
   if(sysStatus.verboseMode) publishQueue.publish("Startup",StartupMessage,PRIVATE);                       // Let Particle know how the startup process went
 
@@ -496,6 +501,8 @@ void loadSystemDefaults() {                                                     
   sysStatus.lowBatteryMode = false;
   sysStatus.reportingBoundary = 10*60;
   sysStatus.operatingMode = 1;
+  sysStatus.sensorOneConnected = 1;
+  sysStatus.sensorFiveConnected=1;
   fram.put(FRAM::sysStatusAddr,sysStatus);                                                  // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -505,7 +512,7 @@ void loadConstantDefaults(){                                                 // 
   sensorConstants.sensorTwoConstant = 90.9;
   sensorConstants.sensorThreeConstant = 90.9;
   sensorConstants.sensorFourConstant = 90.9;
-  sensorConstants.sensorFiveConstant = 90.9;
+  sensorConstants.sensorFiveConstant = 667;
   sensorConstants.sensorSixConstant = 90.9;
   fram.put(FRAM::sensorConstantsAddr,sensorConstants);
 }
@@ -521,6 +528,16 @@ void checkSystemValues() {                                                      
   if (sysStatus.resetCount < 0 || sysStatus.resetCount > 255) sysStatus.resetCount = 0;
   if (sysStatus.operatingMode<0 || sysStatus.operatingMode>5) sysStatus.operatingMode = 1;
   sysStatusWriteNeeded = true;
+}
+
+void checkConstantValues() {                                                                  // Checks to ensure that all system values are in reasonable range 
+  if ( sensorConstants.sensorOneConstant < 0.0  || sensorConstants.sensorOneConstant > 3000.0) sensorConstants.sensorOneConstant = 90.91;
+  if ( sensorConstants.sensorTwoConstant < 0.0  || sensorConstants.sensorTwoConstant > 3000.0) sensorConstants.sensorTwoConstant = 90.91;
+  if ( sensorConstants.sensorThreeConstant < 0.0  || sensorConstants.sensorThreeConstant > 3000.0) sensorConstants.sensorThreeConstant = 90.91;
+  if ( sensorConstants.sensorFourConstant < 0.0  || sensorConstants.sensorFourConstant > 3000.0) sensorConstants.sensorFourConstant = 90.91;
+  if ( sensorConstants.sensorFiveConstant < 0.0  || sensorConstants.sensorFiveConstant > 3000.0) sensorConstants.sensorFiveConstant = 90.91;
+  if ( sensorConstants.sensorSixConstant < 0.0  || sensorConstants.sensorSixConstant > 3000.0) sensorConstants.sensorSixConstant = 90.91;
+  fram.put(FRAM::sensorConstantsAddr,sensorConstants);
 }
 
 
@@ -662,7 +679,6 @@ int setKeepAlive(String command)
 
 int setConstantOne(String command){
   sensorConstants.sensorOneConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant One Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -670,7 +686,6 @@ int setConstantOne(String command){
 
 int setConstantTwo(String command){
   sensorConstants.sensorTwoConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Two Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -678,7 +693,6 @@ int setConstantTwo(String command){
 
 int setConstantThree(String command){
   sensorConstants.sensorThreeConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Three Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -686,7 +700,6 @@ int setConstantThree(String command){
 
 int setConstantFour(String command){
   sensorConstants.sensorFourConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Four Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -701,7 +714,6 @@ int setConstantFive(String command){
 
 int setConstantSix(String command){
   sensorConstants.sensorSixConstant = command.toFloat();
-  loadEmonlib();
   publishQueue.publish("Constant Six Value set to ",String(command),PRIVATE);
   updateConstantValues();
   return 1;
@@ -892,12 +904,30 @@ void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Nam
 }
 
 
+/*
+void Three_Phase_Monitor(uint8_t Wires,float *Current_rms_per_Phase,float *Power_rms_per_Phase){
+   uint8_t p=0;
+   p=Wires;
+   float i_rms_per_Phase[p]={0};
+   
+  for (uint8_t i=0;i<p;i++){
+  i_rms_per_Phase[i]=emon[i].calcIrms(1480);
+  
+  Current_rms_per_Phase[i]=i_rms_per_Phase[i];
+  Power_rms_per_Phase[i]=((i_rms_per_Phase[i]*Vrms)/1000); //in kW
+    
+  }
+  
+}
+*/
+
+
+
 // These are the functions that are part of the takeMeasurements call
 
 bool takeMeasurements() 
 {
     sensorData.validData = false;
-    loadEmonlib();
     getBatteryContext();     
     
     // If operatingMode is '1'. All single phase
@@ -922,9 +952,12 @@ bool takeMeasurements()
       Three_Phase_Monitor(3,ThreePhaseLoadOne,sensorData.I_ThreePhaseLoad_One,sensorData.P_ThreePhaseLoad_One);
       
       // CT4 to CT6 are available for single phase operation.
-      if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480);
-      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+      if (sysStatus.sensorFourConnected) sensorData.sensorFourCurrent =  emon4.calcIrms(1480); 
+      else sensorData.sensorFourCurrent=0;
+      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);    
+      else sensorData.sensorFiveCurrent=0;           
       if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);  
+      else sensorData.sensorSixCurrent=0;
     }
     // In operation mode 4, The load is of 4 wires. CT1 to CT 4 are load A and CT5 to CT6 are available for single phase operation.
     else if (sysStatus.operatingMode == 4){
@@ -932,9 +965,13 @@ bool takeMeasurements()
       Three_Phase_Monitor(4,ThreePhaseLoadFourWires,sensorData.Four_ThreePhaseLoad_I,sensorData.Four_ThreePhaseLoad_P);
       
       // CT5 & CT6 are available for single phase operation.
-      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);               
+      if (sysStatus.sensorFiveConnected) sensorData.sensorFiveCurrent =  emon5.calcIrms(1480);       
+      else sensorData.sensorFiveCurrent=0;                  
       if (sysStatus.sensorSixConnected) sensorData.sensorSixCurrent =   emon6.calcIrms(1480);  
+      else sensorData.sensorSixCurrent=0;
     }
+
+    sensorDataWriteNeeded = true;
 
     if (((abs(sensorData.sensorOneCurrent)-(sensorData.sensorOnePrevious)) >= 1.5) || ((abs(sensorData.sensorTwoCurrent)-(sensorData.sensorTwoPrevious)) >= 1.5) || ((abs(sensorData.sensorThreeCurrent)-(sensorData.sensorThreePrevious)) >= 1.5) || ((abs(sensorData.sensorFourCurrent)-(sensorData.sensorFourPrevious)) >= 1.5) || ((abs(sensorData.sensorFiveCurrent)-(sensorData.sensorFivePrevious)) >= 1.5) || ((abs(sensorData.sensorSixCurrent)-(sensorData.sensorSixPrevious)) >= 1.5)) {
       // Indicate that this is a valid data array and store it
@@ -960,6 +997,13 @@ void loadEmonlib(){
   emon4.current(CT4_PIN,sensorConstants.sensorFourConstant);
   emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
   emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
+
+  emon[0].current(CT1_PIN,sensorConstants.sensorOneConstant);
+  emon[1].current(CT2_PIN,sensorConstants.sensorTwoConstant);
+  emon[2].current(CT3_PIN,sensorConstants.sensorThreeConstant);
+  emon[3].current(CT4_PIN,sensorConstants.sensorFourConstant);
+  emon[4].current(CT5_PIN,sensorConstants.sensorFiveConstant);
+  emon[5].current(CT6_PIN,sensorConstants.sensorSixConstant);
   constantsStatusWriteNeeded = true;
 
 }
@@ -968,6 +1012,9 @@ int resetSystem(String Command){
   char * pEND;
   int command = strtol(Command,&pEND,10);                                                  // Looks for the first integer and interprets it
   if (command == 1) {
+    
+    publishQueue.publish("Reset","Device Reset Success",PRIVATE);
+    delay(5000);
     System.reset();
     return 1;
     }
