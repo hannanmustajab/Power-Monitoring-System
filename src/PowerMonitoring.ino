@@ -62,12 +62,13 @@
 // v6.00 - Changed FRAM Settings. 
 // v8.00 - Added get data usage function. 
 // v10.00 - Changed fram memory spacing, added particle function to reset device, particle variables reporting constants fixed and fixed instance initiations. 
+// v11.00 - Webhook for influx db works with dynamic device ID.
 
 
 PRODUCT_ID(11734);
-PRODUCT_VERSION(10); 
+PRODUCT_VERSION(11); 
 
-const char releaseNumber[8] = "10.00";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "11.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -315,6 +316,7 @@ void setup() {
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
 
+
   // Load FRAM and reset variables to their correct values
   fram.begin();                                                                             // Initialize the FRAM module
 
@@ -522,10 +524,18 @@ void keepAliveMessage() {
 
 void sendEvent()
 {
-  char data[512];                 
+  char data[256];       
+  char influx_hook[512];          
   if (sysStatus.operatingMode == 1){
+    
+    // Webhook to send data to influx database
+    String myDeviceID = System.deviceID();                                                                                                              // Device ID
+    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"location\": \"Hannan-Home\",\"Device-Name\": \"KUMVA011\",\"device_id\": \"%s\"},\"values\": {\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}}",myDeviceID.c_str(),sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+   
+    // Webhook to send data to ubidots. 
     snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
-  } else if (sysStatus.operatingMode == 2){
+  
+  }else if (sysStatus.operatingMode == 2){
     snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorTwoR\":%4.1f,  \"sensorTwoS\":%4.1f,\"sensorTwoT\":%4.1f,\"Mode\":2}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.I_ThreePhaseLoad_Two[0],sensorData.I_ThreePhaseLoad_Two[1],sensorData.I_ThreePhaseLoad_Two[2]);
   }else if (sysStatus.operatingMode == 3){
     snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":3}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
@@ -533,6 +543,7 @@ void sendEvent()
     snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"SensorOneN\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":4}", sensorData.Four_ThreePhaseLoad_I[0] ,sensorData.Four_ThreePhaseLoad_I[1],sensorData.Four_ThreePhaseLoad_I[2],sensorData.Four_ThreePhaseLoad_I[3],sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
   }
   publishQueue.publish("powermonitoring_hook", data, PRIVATE);
+  publishQueue.publish("influx_hook", influx_hook, PRIVATE);
   // Update the previous sensor values.
   sensorData.sensorOnePrevious = sensorData.sensorOneCurrent;
   sensorData.sensorTwoPrevious = sensorData.sensorTwoCurrent;
@@ -958,7 +969,7 @@ bool takeMeasurements()
 
     sensorDataWriteNeeded = true;
 
-    if (((abs(sensorData.sensorOneCurrent)-(sensorData.sensorOnePrevious)) >= 1.5) || ((abs(sensorData.sensorTwoCurrent)-(sensorData.sensorTwoPrevious)) >= 1.5) || ((abs(sensorData.sensorThreeCurrent)-(sensorData.sensorThreePrevious)) >= 1.5) || ((abs(sensorData.sensorFourCurrent)-(sensorData.sensorFourPrevious)) >= 1.5) || ((abs(sensorData.sensorFiveCurrent)-(sensorData.sensorFivePrevious)) >= 1.5) || ((abs(sensorData.sensorSixCurrent)-(sensorData.sensorSixPrevious)) >= 1.5)) {
+    if ( ((abs(sensorData.sensorOneCurrent)-(sensorData.sensorOnePrevious)) >= 1.5) || ((abs(sensorData.sensorTwoCurrent)-(sensorData.sensorTwoPrevious)) >= 1.5) || ((abs(sensorData.sensorThreeCurrent)-(sensorData.sensorThreePrevious)) >= 1.5) || ((abs(sensorData.sensorFourCurrent)-(sensorData.sensorFourPrevious)) >= 1.5) || ((abs(sensorData.sensorFiveCurrent)-(sensorData.sensorFivePrevious)) >= 1.5) || ((abs(sensorData.sensorSixCurrent)-(sensorData.sensorSixPrevious)) >= 1.5)) {
       // Indicate that this is a valid data array and store it
       sensorData.validData = true;
       sensorData.timeStamp = Time.now();
