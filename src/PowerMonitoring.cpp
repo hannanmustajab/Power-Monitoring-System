@@ -68,8 +68,8 @@
 // v6.00 - Changed FRAM Settings. 
 // v8.00 - Added get data usage function. 
 // v10.00 - Changed fram memory spacing, added particle function to reset device, particle variables reporting constants fixed and fixed instance initiations. 
-// v11.00 - Testing webhook for TICK stack. Influx db webhook change.
-
+// v11.00 - Webhook for influx db works with dynamic device ID.
+// v12.00 - Rickkas Library for cloud configuration. 
 
 void setup();
 void loop();
@@ -106,7 +106,7 @@ void loadEmonlib();
 int resetSystem(String Command);
 #line 68 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
 PRODUCT_ID(11734);
-PRODUCT_VERSION(10); 
+PRODUCT_VERSION(11); 
 
 const char releaseNumber[8] = "11.00";                                                      // Displays the release on the menu
 
@@ -117,7 +117,8 @@ const char releaseNumber[8] = "11.00";                                          
 #include "MCP79410RK.h"                                                                     // Real Time Clock
 #include "EmonLib.h"                                                                        // Include Emon Library
 #include "AC_MonitorLib.h"                                                                  // Include Load_Monitoring Library
-
+#include "DeviceNameHelperRK.h"                                                             // Rickkas Particle based library for getting device name.
+#include "CloudConfigRK.h"                                                                  // Rickkas Particle based library for cloud configuration.
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(AUTOMATIC);                                                                     // This will enable user code to start executing automatically.
@@ -129,6 +130,8 @@ retained uint8_t publishQueueRetainedBuffer[2048];                              
 PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
 Timer keepAliveTimer(1000, keepAliveMessage);
 Load_Monitor KUMVA_IO;                                                                       //Create an instance
+retained DeviceNameHelperData deviceNameHelperRetained;                                     // Ricckas retained device name instance. 
+
 
 // Define the memory map - note can be EEPROM or FRAM - moving to FRAM for speed and to avoid memory wear
 namespace FRAM {                                                                            // Moved to namespace instead of #define to limit scope
@@ -260,6 +263,12 @@ double Vrms=220;                                                                
 // Time Period Related Variables
 const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
 
+retained CloudConfigData<256> retainedConfig;
+
+
+void logJson();
+
+
 /************************CT LIBRARY RELATED Instances, Pinouts etc.***********************************/
 
 //  Pins assignment/Functions definition-> DON'T CHANGE/MODIFY THESE                               
@@ -356,6 +365,25 @@ void setup() {
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
 
+  // Load Cloud Configuration
+  // You must call this from setup!
+    CloudConfig::instance()
+        .withDataCallback([]() {
+            Log.info("dataCallback");        
+            logJson();
+        })
+        .withUpdateFrequency(1440min)
+        .withUpdateMethod(new CloudConfigUpdateWebhook("CloudConfigDeviceNotes"))
+        .withStorageMethod(new CloudConfigStorageRetained(&retainedConfig, sizeof(retainedConfig)))
+        .setup();
+
+  // Load Device Name from Rickkas Library. 
+  DeviceNameHelperRetained::instance().withNameCallback([](const char *name) {
+      Particle.publish("Device Name",String(name), PRIVATE);
+  });
+
+  // You must call this from setup!
+  DeviceNameHelperRetained::instance().setup(&deviceNameHelperRetained);
 
   // Load FRAM and reset variables to their correct values
   fram.begin();                                                                             // Initialize the FRAM module
@@ -474,6 +502,9 @@ void loop() {
     break;
   }
 
+  DeviceNameHelperRetained::instance().loop();
+  CloudConfig::instance().loop();
+
   rtc.loop();                                                                               // keeps the clock up to date
 
   if (watchdogFlag) petWatchdog();                                                          // Watchdog flag is raised - time to pet the watchdog
@@ -570,7 +601,7 @@ void sendEvent()
     
     // Webhook to send data to influx database
     String myDeviceID = System.deviceID();                                                                                                              // Device ID
-    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"location\": \"Hannan-Home\",\"Device-Name\": \"KUMVA011\",\"device_id\": \"%s\"},\"values\": {\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}}",myDeviceID.c_str(),sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"alias\": \"%s\",\"lat\": \"%s\",\"longitude\": \"%s\",\"product\": \"%s\",\"Device-Name\": \"%s\",\"device_id\": \"%s\"},\"values\": {\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}}", CloudConfig::instance().getString("alias"),CloudConfig::instance().getString("lat"),CloudConfig::instance().getString("long"),CloudConfig::instance().getString("product"),DeviceNameHelperRetained::instance().getName(),myDeviceID.c_str(),sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
    
     // Webhook to send data to ubidots. 
     snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
@@ -1044,15 +1075,25 @@ void loadEmonlib(){
 
 }
 
-int resetSystem(String Command){
+int resetSystem(String Command)
+
+{
   char * pEND;
   int command = strtol(Command,&pEND,10);                                                  // Looks for the first integer and interprets it
-  if (command == 1) {
-    
-    publishQueue.publish("Reset","Device Reset Success",PRIVATE);
-    delay(5000);
-    System.reset();
-    return 1;
+    if (command == 1) {
+      publishQueue.publish("Reset","Device Reset Success",PRIVATE);
+      delay(5000);
+      System.reset();
+      return 1;
+      }
+    else return 0;  
+  }
+
+void logJson() {
+    if (CloudConfig::instance().getJSONValueForKey("alias").isValid()) {
+      Particle.publish("Client Name",String(CloudConfig::instance().getString("alias")),PRIVATE);
     }
-  else return 0;  
+    else {
+        Log.info("no config set");
+    }
 }

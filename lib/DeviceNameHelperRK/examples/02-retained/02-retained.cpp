@@ -23,4 +23,7 @@ void setup() {
 void loop() {
     // You must call this from loop!
     DeviceNameHelperRetained::instance().loop();
+     DeviceNameHelperRetained::getName()
+
+    
 }
