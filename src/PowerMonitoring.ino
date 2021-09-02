@@ -74,11 +74,13 @@
 // v10.00 - Changed fram memory spacing, added particle function to reset device, particle variables reporting constants fixed and fixed instance initiations. 
 // v11.00 - Webhook for influx db works with dynamic device ID.
 // v12.00 - Added Rickkas Library for cloud configuration and Getting device name. Used these two libraries to build webhook for influx database. It reads data from device notes! 
+// v12.01 - Added function to send device configuration.
+
 
 PRODUCT_ID(11734);
 PRODUCT_VERSION(12); 
 
-const char releaseNumber[8] = "12.00";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "12.02";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -126,15 +128,15 @@ struct systemStatus_structure {
   uint8_t batteryState;                                                                             // Stores the current battery state
   int resetCount;                                                                                   // reset count of device (0-256)
   unsigned long lastHookResponse;                                                                   // Last time we got a valid Webhook response
-  bool sensorOneConnected;                                                                   // Check if sensor One is connected.                                   
-  bool sensorTwoConnected;                                                                  // Check if sensor Two is connected.                                   
+  bool sensorOneConnected;                                                                          // Check if sensor One is connected.                                   
+  bool sensorTwoConnected;                                                                          // Check if sensor Two is connected.                                   
   bool sensorThreeConnected;;                                                                // Check if sensor Three is connected.                                   
-  bool sensorFourConnected;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorFiveConnected;                                                                 // Check if sensor Three is connected.                                   
-  bool sensorSixConnected;                                                                  // Check if sensor Three is connected.     
-  int reportingBoundary;                                                       // 0 hour 20 minutes 0 seconds
+  bool sensorFourConnected;                                                                  // Check if sensor Three is connected.                                   
+  bool sensorFiveConnected;                                                                  // Check if sensor Three is connected.                                   
+  bool sensorSixConnected;                                                                   // Check if sensor Three is connected.     
+  int reportingBoundary;                                                                      // 0 hour 20 minutes 0 seconds
 
-  int operatingMode=1;                                                                              // Check the operation mode,  
+  int operatingMode;                                                                              // Check the operation mode,  
   /*
     * 1 if single phase mode
     * 2 if three phase mode with 3 wires.
@@ -251,39 +253,8 @@ uint8_t CT6_PIN=A0;
 
 // Initialize the emon library.
 
-EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6, emon[6];               // Create an instance
+EnergyMonitor emon1,emon2,emon3,emon4,emon5,emon6;  // Create an instance
 
-  /*  Examples of 3 phase loads 
-    * a load is a three phase when it use 3 or 4 CTs
-    * is connected to CTx1 (Ax1), CTx2 (Ax2), CTx3 (Ax3), CTx4 (Ax4)
-    * Specifit the CTs used calibration constants
-    * Create a struct as shown below: 
-  */
-/*
-  // Three Phase Load with 3 Wires - Load One
-  Load_Monitor::CT_Property_Struct ThreePhaseLoadOne[3] = {
-    {CT1_PIN,sensorConstants.sensorOneConstant}, // R phase
-    {CT2_PIN,sensorConstants.sensorTwoConstant}, // T phase
-    {CT3_PIN,sensorConstants.sensorThreeConstant} // S phase 
-  };
-
-  // Three Phase Load with 3 Wires - Load Two
-  Load_Monitor::CT_Property_Struct ThreePhaseLoadTwo[3]=
-  {  
-        {CT4_PIN,sensorConstants.sensorFourConstant}, // R phase
-        {CT5_PIN,sensorConstants.sensorFiveConstant}, // T phase
-        {CT6_PIN,sensorConstants.sensorSixConstant} // S phase 
-  };
-
-  // Three Phase Load with 4 Wires - Load One
-  Load_Monitor::CT_Property_Struct ThreePhaseLoadFourWires[4]={                                 // 4- wires Three phase Load 
-      {CT1_PIN,sensorConstants.sensorOneConstant},                                              // R phase
-      {CT2_PIN,sensorConstants.sensorTwoConstant},                                              // S phase
-      {CT3_PIN,sensorConstants.sensorThreeConstant},                                            // T phase 
-      {CT4_PIN,sensorConstants.sensorFourConstant}                                              // N phase 
-   };
-   */
-   
 // setup() runs once, when the device is first turned on.
 void setup() {
   pinMode(wakeUpPin,INPUT);                                                                 // This pin is active HIGH, 
@@ -317,6 +288,7 @@ void setup() {
 
 
   Particle.function("Measure-Now",measureNow);
+  Particle.function("Check Configuration",sendConfigurationFunction);
   Particle.function("Verbose-Mode",setVerboseMode);
   Particle.function("Keep Alive",setKeepAlive);
   Particle.function("3rd Party Sim", setThirdPartySim);
@@ -339,7 +311,6 @@ void setup() {
   // You must call this from setup!
     CloudConfig::instance()
         .withDataCallback([]() {
-            Log.info("dataCallback");        
             logJson();
         })
         .withUpdateFrequency(1440min)
@@ -348,9 +319,7 @@ void setup() {
         .setup();
 
   // Load Device Name from Rickkas Library. 
-  DeviceNameHelperRetained::instance().withNameCallback([](const char *name) {
-      Particle.publish("Device Name",String(name), PRIVATE);
-  });
+  DeviceNameHelperRetained::instance().withNameCallback([](const char *name) {});
 
   // You must call this from setup!
   DeviceNameHelperRetained::instance().setup(&deviceNameHelperRetained);
@@ -372,7 +341,6 @@ void setup() {
     }
   }
   else {
-    publishQueue.publish("Loading From FRAM","Setup Loop",PRIVATE);
     fram.get(FRAM::sensorConstantsAddr,sensorConstants);
     fram.get(FRAM::sysStatusAddr,sysStatus);                                                // Loads the System Status array from FRAM
   }
@@ -380,7 +348,7 @@ void setup() {
   checkConstantValues();
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
-  loadEmonlib();
+  loadEmonlib();                                                                            // Initialize the emon library modules.
   
 
   if (sysStatus.thirdPartySim) {
@@ -396,6 +364,8 @@ void setup() {
   if(sysStatus.verboseMode) publishQueue.publish("Startup",StartupMessage,PRIVATE);                       // Let Particle know how the startup process went
 
   waitUntil(Particle.connected);
+
+  sendConfiguration();
 
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;                                    // We made it throughgo let's go to idle
   
@@ -506,8 +476,6 @@ void loadSystemDefaults() {                                                     
   sysStatus.lowBatteryMode = false;
   sysStatus.reportingBoundary = 10*60;
   sysStatus.operatingMode = 1;
-  sysStatus.sensorOneConnected = 1;
-  sysStatus.sensorFiveConnected=1;
   fram.put(FRAM::sysStatusAddr,sysStatus);                                                  // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -517,7 +485,7 @@ void loadConstantDefaults(){                                                 // 
   sensorConstants.sensorTwoConstant = 90.9;
   sensorConstants.sensorThreeConstant = 90.9;
   sensorConstants.sensorFourConstant = 90.9;
-  sensorConstants.sensorFiveConstant = 667;
+  sensorConstants.sensorFiveConstant = 90.9;
   sensorConstants.sensorSixConstant = 90.9;
   fram.put(FRAM::sensorConstantsAddr,sensorConstants);
 }
@@ -616,10 +584,10 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
     sysStatusWriteNeeded = true;
     dataInFlight = false;                                             // Data has been received
   }
-  else {
+  else if((atoi(data)) < 10000){
     snprintf(responseString, sizeof(responseString), "Unknown response recevied %i",atoi(data));
   }
-  publishQueue.publish("Ubidots Hook", responseString, PRIVATE);
+  
 }
 
 // Function to Blink the LED for alerting. 
@@ -835,6 +803,7 @@ int enableSensor(String Sensor){
     sysStatusWriteNeeded = true; 
     return 1;      
   }
+  return 0;
 }
 
 /* 
@@ -888,6 +857,7 @@ int disableSensor(String Sensor){
     sysStatusWriteNeeded = true; 
     return 1;      
   }
+  return 0;
 }
 
 int setOperatingMode(String Sensor){
@@ -924,25 +894,6 @@ void Three_Phase_Monitor(uint8_t Wires,Load_Monitor::CT_Property_Struct Load_Nam
   }
   
 }
-
-
-/*
-void Three_Phase_Monitor(uint8_t Wires,float *Current_rms_per_Phase,float *Power_rms_per_Phase){
-   uint8_t p=0;
-   p=Wires;
-   float i_rms_per_Phase[p]={0};
-   
-  for (uint8_t i=0;i<p;i++){
-  i_rms_per_Phase[i]=emon[i].calcIrms(1480);
-  
-  Current_rms_per_Phase[i]=i_rms_per_Phase[i];
-  Power_rms_per_Phase[i]=((i_rms_per_Phase[i]*Vrms)/1000); //in kW
-    
-  }
-  
-}
-*/
-
 
 
 // These are the functions that are part of the takeMeasurements call
@@ -1028,7 +979,7 @@ bool takeMeasurements()
   }
 
 
-  void getBatteryCharge()
+void getBatteryCharge()
 {
   // voltage = analogRead(BATT) * 0.0011224;
   // snprintf(batteryString, sizeof(batteryString), "%3.1f V", voltage);
@@ -1042,13 +993,6 @@ void loadEmonlib(){
   emon4.current(CT4_PIN,sensorConstants.sensorFourConstant);
   emon5.current(CT5_PIN,sensorConstants.sensorFiveConstant);
   emon6.current(CT6_PIN,sensorConstants.sensorSixConstant);
-
-  emon[0].current(CT1_PIN,sensorConstants.sensorOneConstant);
-  emon[1].current(CT2_PIN,sensorConstants.sensorTwoConstant);
-  emon[2].current(CT3_PIN,sensorConstants.sensorThreeConstant);
-  emon[3].current(CT4_PIN,sensorConstants.sensorFourConstant);
-  emon[4].current(CT5_PIN,sensorConstants.sensorFiveConstant);
-  emon[5].current(CT6_PIN,sensorConstants.sensorSixConstant);
   constantsStatusWriteNeeded = true;
 
 }
@@ -1068,10 +1012,80 @@ int resetSystem(String Command)
   }
 
 void logJson() {
-    if (CloudConfig::instance().getJSONValueForKey("alias").isValid()) {
-      Particle.publish("Client Name",String(CloudConfig::instance().getString("alias")),PRIVATE);
-    }
+    if (CloudConfig::instance().getJSONValueForKey("alias").isValid()) {}
     else {
         Log.info("no config set");
     }
+}
+
+int sendConfigurationFunction(String command) // Function to force sending data in current hour
+{
+  if (command == "1") {
+    sendConfiguration();
+    return 1;
+  }
+  else return 0;
+}
+
+// This function is used for onsite checking and debugging. It sends device configuration as json data. 
+void sendConfiguration(){
+  char data[512];
+  memset(data, 0, sizeof(data));
+  JSONBufferWriter writer(data, sizeof(data));
+  writer.beginObject();
+    writer.name("Name").value(DeviceNameHelperRetained::instance().getName());
+    writer.name("Release").value(releaseNumber);
+    writer.name("Operating Mode").value(String(sysStatus.operatingMode));
+    writer.name("Sensors");
+    writer.beginObject();
+      if ((sysStatus.operatingMode) == 1){
+        writer.name("SensorOneConnected").value(sysStatus.sensorOneConnected);
+        writer.name("SensorOneConstant").value(sensorConstants.sensorOneConstant);
+        writer.name("SensorTwoConnected").value(sysStatus.sensorTwoConnected);
+        writer.name("SensorTwoConstant").value(sensorConstants.sensorTwoConstant);
+        writer.name("SensorThreeConnected").value(sysStatus.sensorThreeConnected);
+        writer.name("SensorThreeConstant").value(sensorConstants.sensorThreeConstant);
+        writer.name("SensorFourConnected").value(sysStatus.sensorFourConnected);
+        writer.name("SensorFourConstant").value(sensorConstants.sensorFourConstant);
+        writer.name("SensorFiveConnected").value(sysStatus.sensorFiveConnected);
+        writer.name("SensorFiveConstant").value(sensorConstants.sensorFiveConstant);
+        writer.name("SensorSixConnected").value(sysStatus.sensorSixConnected);
+        writer.name("SensorSixConstant").value(sensorConstants.sensorSixConstant);
+      }
+      else if ((sysStatus.operatingMode) == 2){
+        writer.name("SensorOneConnected").value(true);
+        writer.name("SensorOneConstant").value(sensorConstants.sensorOneConstant);
+        writer.name("SensorTwoConnected").value(true);
+        writer.name("SensorTwoConstant").value(sensorConstants.sensorTwoConstant);
+        writer.name("SensorThreeConnected").value(true);
+        writer.name("SensorThreeConstant").value(sensorConstants.sensorThreeConstant);
+        writer.name("SensorFourConnected").value(true);
+        writer.name("SensorFourConstant").value(sensorConstants.sensorFourConstant);
+        writer.name("SensorFiveConnected").value(true);
+        writer.name("SensorFiveConstant").value(sensorConstants.sensorFiveConstant);
+        writer.name("SensorSixConnected").value(true);
+        writer.name("SensorSixConstant").value(sensorConstants.sensorSixConstant);
+      }
+      else if ((sysStatus.operatingMode) == 3){
+        writer.name("SensorOneConnected").value(true);
+        writer.name("SensorOneConstant").value(sensorConstants.sensorOneConstant);
+        writer.name("SensorTwoConnected").value(true);
+        writer.name("SensorTwoConstant").value(sensorConstants.sensorTwoConstant);
+        writer.name("SensorThreeConnected").value(true);
+        writer.name("SensorThreeConstant").value(sensorConstants.sensorThreeConstant);
+        writer.name("SensorFourConnected").value(sysStatus.sensorFourConnected);
+        writer.name("SensorFourConstant").value(sensorConstants.sensorFourConstant);
+        writer.name("SensorFiveConnected").value(sysStatus.sensorFiveConnected);
+        writer.name("SensorFiveConstant").value(sensorConstants.sensorFiveConstant);
+        writer.name("SensorSixConnected").value(sysStatus.sensorSixConnected);
+        writer.name("SensorSixConstant").value(sensorConstants.sensorSixConstant);
+      }
+    writer.endObject();
+    writer.name("Third Party Sim").value(sysStatus.thirdPartySim);
+    writer.name("KeepAlive").value(sysStatus.keepAlive);
+    writer.name("Reporting Duration").value(sysStatus.reportingBoundary);
+  writer.endObject();
+
+  publishQueue.publish("System Configuration",data,PRIVATE);
+ 
 }
