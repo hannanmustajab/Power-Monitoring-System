@@ -38,8 +38,8 @@
 
   Constant Values 
     * For 100A | 0.05A and 22ohms resistors -> (100/0.05) / 22 = 90.91
-    * For 200A | 0.3A and 20 ohms -> (200/0.3)/20 = 33.3
-    * For 400A | 0.33A and 10 ohms -> (400/0.33)/10 = 121
+    * For 200A | 0.3A and 20 ohms -> (200/0.3) = 667
+    * For 400A | 0.33A and 10 ohms -> (400/0.33) = 1333
     * For 600A | 
   
   Cloud Configuration 
@@ -75,12 +75,18 @@
 // v11.00 - Webhook for influx db works with dynamic device ID.
 // v12.00 - Added Rickkas Library for cloud configuration and Getting device name. Used these two libraries to build webhook for influx database. It reads data from device notes! 
 // v12.01 - Added function to send device configuration.
+// v13.01 - Changed from snprintf to json buffer writer for sending influx webhook data.
+// v13.02 - Made changes to JSON writer to send data only from the enabled sensor. 
+// v13.03 - Switched to JSON Writer for ubidots webhook.
+// v13.00 - Stable release - Swtiched to JSON Writer, Added payload to check device configuration, moved to change based reporting of 20%. 
+
+// TODO  - Move three phase load to change based reporting. 
 
 
 PRODUCT_ID(11734);
-PRODUCT_VERSION(12); 
+PRODUCT_VERSION(13); 
 
-const char releaseNumber[8] = "12.02";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "13.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -163,12 +169,19 @@ struct sensor_data_struct {                                                     
   float sensorFiveCurrent;
   float sensorSixCurrent;
   
-  float sensorOnePrevious;
-  float sensorTwoPrevious;
-  float sensorThreePrevious;
-  float sensorFourPrevious;
-  float sensorFivePrevious;
-  float sensorSixPrevious;
+  float sensorOnePreviousHigh;
+  float sensorTwoPreviousHigh;
+  float sensorThreePreviousHigh;
+  float sensorFourPreviousHigh;
+  float sensorFivePreviousHigh;
+  float sensorSixPreviousHigh;
+
+  float sensorOnePreviousLow;
+  float sensorTwoPreviousLow;
+  float sensorThreePreviousLow;
+  float sensorFourPreviousLow;
+  float sensorFivePreviousLow;
+  float sensorSixPreviousLow;
 
   // Three phase sensors with 3 wires. Maximum of two such devices can be connected.
 
@@ -233,7 +246,7 @@ float voltage;                                                                  
 double Vrms=220;                                                                          // Standard Utility Voltage , Can be modified for better accuracy
 
 // Time Period Related Variables
-const int wakeBoundary = 0*3600 + 0*60 + 10;                                                // 0 hour 20 minutes 0 seconds
+const int wakeBoundary = 0*3600 + 0*60 + 5;                                                // 0 hour 20 minutes 0 seconds
 
 retained CloudConfigData<256> retainedConfig;
 
@@ -282,7 +295,6 @@ void setup() {
   Particle.variable("Constant Four", sensorFourConstantStr);
   Particle.variable("Constant Five", sensorFiveConstantStr);
   Particle.variable("Constant Six", sensorSixConstantStr);
-
   Particle.variable("Reporting Duration",sysStatus.reportingBoundary);
   Particle.variable("Operation Mode",sysStatus.operatingMode);
 
@@ -513,7 +525,6 @@ void checkConstantValues() {                                                    
   fram.put(FRAM::sensorConstantsAddr,sensorConstants);
 }
 
-
 void watchdogISR()
 {
   watchdogFlag = true;
@@ -533,41 +544,162 @@ void keepAliveMessage() {
 
 void sendEvent()
 {
-  char data[256];       
-  char influx_hook[512];      
-  String myDeviceID = System.deviceID();                                         // Device ID
-  if (sysStatus.operatingMode == 1){
     
-    // Webhook to send data to influx database                                               
-    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"alias\": \"%s\",\"lat\": \"%s\",\"longitude\": \"%s\",\"product\": \"%s\",\"client\": \"%s\",\"Device-Name\": \"%s\",\"device_id\": \"%s\"},\"values\": {\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}}", CloudConfig::instance().getString("alias"),CloudConfig::instance().getString("lat"),CloudConfig::instance().getString("long"),CloudConfig::instance().getString("product"),CloudConfig::instance().getString("client"),DeviceNameHelperRetained::instance().getName(),myDeviceID.c_str(),sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
-   
-    // Webhook to send data to ubidots. 
-    snprintf(data, sizeof(data), "{\"sensorOne\":%4.1f, \"sensorTwo\":%4.1f,  \"sensorThree\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":1}", sensorData.sensorOneCurrent,sensorData.sensorTwoCurrent,sensorData.sensorThreeCurrent,sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
+  String myDeviceID = System.deviceID();                                                        // Device ID
   
-  }else if (sysStatus.operatingMode == 2){
-    // Webhook to send data to influx database                                               
-    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"alias\": \"%s\",\"lat\": \"%s\",\"longitude\": \"%s\",\"product\": \"%s\",\"client\": \"%s\",\"Device-Name\": \"%s\",\"device_id\": \"%s\"},\"values\": {\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorTwoR\":%4.1f,  \"sensorTwoS\":%4.1f,\"sensorTwoT\":%4.1f,\"Mode\":2}}", CloudConfig::instance().getString("alias"),CloudConfig::instance().getString("lat"),CloudConfig::instance().getString("long"),CloudConfig::instance().getString("product"),CloudConfig::instance().getString("client"),DeviceNameHelperRetained::instance().getName(),myDeviceID.c_str(), sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.I_ThreePhaseLoad_Two[0],sensorData.I_ThreePhaseLoad_Two[1],sensorData.I_ThreePhaseLoad_Two[2]);
- 
-    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorTwoR\":%4.1f,  \"sensorTwoS\":%4.1f,\"sensorTwoT\":%4.1f,\"Mode\":2}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.I_ThreePhaseLoad_Two[0],sensorData.I_ThreePhaseLoad_Two[1],sensorData.I_ThreePhaseLoad_Two[2]);
-  }else if (sysStatus.operatingMode == 3){
-    // Webhook to send data to influx database                                               
-    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"alias\": \"%s\",\"lat\": \"%s\",\"longitude\": \"%s\",\"product\": \"%s\",\"client\": \"%s\",\"Device-Name\": \"%s\",\"device_id\": \"%s\"},\"values\": {\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":3}}", CloudConfig::instance().getString("alias"),CloudConfig::instance().getString("lat"),CloudConfig::instance().getString("long"),CloudConfig::instance().getString("product"),CloudConfig::instance().getString("client"),DeviceNameHelperRetained::instance().getName(),myDeviceID.c_str(), sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
- 
-    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"sensorFour\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":3}", sensorData.I_ThreePhaseLoad_One[0],sensorData.I_ThreePhaseLoad_One[1],sensorData.I_ThreePhaseLoad_One[2],sensorData.sensorFourCurrent,sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
-  }else if (sysStatus.operatingMode == 4){
-    // Webhook to send data to influx database                                               
-    snprintf(influx_hook,sizeof(influx_hook),"{ \"tags\" : {\"alias\": \"%s\",\"lat\": \"%s\",\"longitude\": \"%s\",\"product\": \"%s\",\"client\": \"%s\",\"Device-Name\": \"%s\",\"device_id\": \"%s\"},\"values\": {\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"SensorOneN\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":4}}", CloudConfig::instance().getString("alias"),CloudConfig::instance().getString("lat"),CloudConfig::instance().getString("long"),CloudConfig::instance().getString("product"),CloudConfig::instance().getString("client"),DeviceNameHelperRetained::instance().getName(),myDeviceID.c_str(), sensorData.Four_ThreePhaseLoad_I[0] ,sensorData.Four_ThreePhaseLoad_I[1],sensorData.Four_ThreePhaseLoad_I[2],sensorData.Four_ThreePhaseLoad_I[3],sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
-    snprintf(data, sizeof(data), "{\"SensorOneR\":%4.1f, \"SensorOneS\":%4.1f,  \"SensorOneT\":%4.1f,  \"SensorOneN\":%4.1f,  \"sensorFive\":%4.1f,\"sensorSix\":%4.1f,\"Mode\":4}", sensorData.Four_ThreePhaseLoad_I[0] ,sensorData.Four_ThreePhaseLoad_I[1],sensorData.Four_ThreePhaseLoad_I[2],sensorData.Four_ThreePhaseLoad_I[3],sensorData.sensorFiveCurrent,sensorData.sensorSixCurrent);
-  }
-  publishQueue.publish("powermonitoring_hook", data, PRIVATE);
+  // Use JSON Writer to create JSON Payload for influx webhook data.
+
+  char influx_hook[512];                                                                        // Influx webhook data.
+  char ubidots_hook[256];                                                                               // Ubidots webhook data.
+  
+  // Influx webhook data.  
+  memset(influx_hook, 0, sizeof(influx_hook));
+  JSONBufferWriter influxPayload(influx_hook, sizeof(influx_hook));
+
+  // Ubidots webhook data
+  memset(ubidots_hook, 0, sizeof(ubidots_hook));
+  JSONBufferWriter ubidotsPayLoad(ubidots_hook, sizeof(ubidots_hook));
+
+  // Begin Payload
+  influxPayload.beginObject();
+  ubidotsPayLoad.beginObject();
+
+  // Start Tags Objects
+    influxPayload.name("tags");
+    influxPayload.beginObject();
+      influxPayload.name("alias").value(CloudConfig::instance().getString("alias"));
+      influxPayload.name("lat").value(CloudConfig::instance().getString("lat"));
+      influxPayload.name("longitude").value(CloudConfig::instance().getString("longitude"));
+      influxPayload.name("product").value(CloudConfig::instance().getString("product"));
+      influxPayload.name("client").value(CloudConfig::instance().getString("client"));
+      influxPayload.name("Device-Name").value(DeviceNameHelperRetained::instance().getName());
+      influxPayload.name("device_id").value(myDeviceID.c_str());
+    influxPayload.endObject();
+  // Values ObjectinfluxPayload
+    influxPayload.name("values");
+    influxPayload.beginObject();
+      // Case 1: If operating mode is 1. 
+      if (sysStatus.operatingMode == 1){
+        if (sysStatus.sensorOneConnected) {
+          influxPayload.name("sensorOne").value(sensorData.sensorOneCurrent);
+          ubidotsPayLoad.name("sensorOne").value(sensorData.sensorOneCurrent);
+        }
+        if (sysStatus.sensorTwoConnected) {
+          influxPayload.name("sensorTwo").value(sensorData.sensorTwoCurrent);
+          ubidotsPayLoad.name("sensorTwo").value(sensorData.sensorTwoCurrent);
+          }
+        if (sysStatus.sensorThreeConnected) {
+          influxPayload.name("sensorThree").value(sensorData.sensorThreeCurrent);
+          ubidotsPayLoad.name("sensorThree").value(sensorData.sensorThreeCurrent);
+
+          }
+        if (sysStatus.sensorFourConnected) {
+          influxPayload.name("sensorFour").value(sensorData.sensorFourCurrent);
+          ubidotsPayLoad.name("sensorFour").value(sensorData.sensorFourCurrent);
+          }
+        if (sysStatus.sensorFiveConnected) {
+          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          }
+        if (sysStatus.sensorSixConnected) {
+          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
+          ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
+          }
+        influxPayload.name("Mode").value(sysStatus.operatingMode);
+        ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
+      }
+      // Case 2: If operating mode is 2. 
+      else if (sysStatus.operatingMode == 2){
+        influxPayload.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
+        influxPayload.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
+        influxPayload.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
+        influxPayload.name("SensorTwoR").value(sensorData.I_ThreePhaseLoad_Two[0]);
+        influxPayload.name("SensorTwoS").value(sensorData.I_ThreePhaseLoad_Two[1]);
+        influxPayload.name("SensorTwoT").value(sensorData.I_ThreePhaseLoad_Two[2]);
+        influxPayload.name("Mode").value(sysStatus.operatingMode);
+
+        ubidotsPayLoad.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
+        ubidotsPayLoad.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
+        ubidotsPayLoad.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
+        ubidotsPayLoad.name("SensorTwoR").value(sensorData.I_ThreePhaseLoad_Two[0]);
+        ubidotsPayLoad.name("SensorTwoS").value(sensorData.I_ThreePhaseLoad_Two[1]);
+        ubidotsPayLoad.name("SensorTwoT").value(sensorData.I_ThreePhaseLoad_Two[2]);
+        ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
+      }
+      // Case 3: If operating mode is 3. 
+      else if (sysStatus.operatingMode == 3){
+        influxPayload.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
+        influxPayload.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
+        influxPayload.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
+
+        ubidotsPayLoad.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
+        ubidotsPayLoad.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
+        ubidotsPayLoad.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
+
+        if (sysStatus.sensorFourConnected) {
+          influxPayload.name("sensorFour").value(sensorData.sensorFourCurrent);
+          ubidotsPayLoad.name("sensorFour").value(sensorData.sensorFourCurrent);
+          }
+        if (sysStatus.sensorFiveConnected) {
+          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          }
+        if (sysStatus.sensorSixConnected) {
+          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
+          ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
+          }
+        influxPayload.name("Mode").value(sysStatus.operatingMode);
+        ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
+      }
+      // Case 3: If operating mode is 4. 
+      else if (sysStatus.operatingMode == 4){
+        influxPayload.name("SensorOneR").value(sensorData.Four_ThreePhaseLoad_I[0]);
+        influxPayload.name("SensorOneS").value(sensorData.Four_ThreePhaseLoad_I[1]);
+        influxPayload.name("SensorOneT").value(sensorData.Four_ThreePhaseLoad_I[2]);
+        influxPayload.name("SensorOneN").value(sensorData.Four_ThreePhaseLoad_I[3]);
+
+        ubidotsPayLoad.name("SensorOneR").value(sensorData.Four_ThreePhaseLoad_I[0]);
+        ubidotsPayLoad.name("SensorOneS").value(sensorData.Four_ThreePhaseLoad_I[1]);
+        ubidotsPayLoad.name("SensorOneT").value(sensorData.Four_ThreePhaseLoad_I[2]);
+        ubidotsPayLoad.name("SensorOneN").value(sensorData.Four_ThreePhaseLoad_I[3]);
+
+        if (sysStatus.sensorFiveConnected) {
+          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
+          }
+        if (sysStatus.sensorSixConnected) {
+          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
+          ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
+          }
+
+        influxPayload.name("Mode").value(sysStatus.operatingMode);
+        ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
+      }
+    influxPayload.endObject();
+  
+  ubidotsPayLoad.endObject();
+  influxPayload.endObject();
+  
+  publishQueue.publish("powermonitoring_hook", ubidots_hook, PRIVATE);
   publishQueue.publish("influx_hook", influx_hook, PRIVATE);
+  
   // Update the previous sensor values.
-  sensorData.sensorOnePrevious = sensorData.sensorOneCurrent;
-  sensorData.sensorTwoPrevious = sensorData.sensorTwoCurrent;
-  sensorData.sensorThreePrevious = sensorData.sensorThreeCurrent;
-  sensorData.sensorFourPrevious = sensorData.sensorFourCurrent;
-  sensorData.sensorFivePrevious = sensorData.sensorFiveCurrent;
-  sensorData.sensorSixPrevious = sensorData.sensorSixCurrent;
+  sensorData.sensorOnePreviousLow = (sensorData.sensorOneCurrent)*0.8;
+  sensorData.sensorTwoPreviousLow = (sensorData.sensorTwoCurrent)*0.8;
+  sensorData.sensorThreePreviousLow = (sensorData.sensorThreeCurrent)*0.8;
+  sensorData.sensorFourPreviousLow = (sensorData.sensorFourCurrent)*0.8;
+  sensorData.sensorFivePreviousLow = (sensorData.sensorFiveCurrent)*0.8;
+  sensorData.sensorSixPreviousLow = (sensorData.sensorSixCurrent)*0.8;
+
+  // Update the previous sensor values.
+  sensorData.sensorOnePreviousHigh = (sensorData.sensorOneCurrent)*1.2;
+  sensorData.sensorTwoPreviousHigh = (sensorData.sensorTwoCurrent)*1.2;
+  sensorData.sensorThreePreviousHigh= (sensorData.sensorThreeCurrent)*1.2;
+  sensorData.sensorFourPreviousHigh = (sensorData.sensorFourCurrent)*1.2;
+  sensorData.sensorFivePreviousHigh = (sensorData.sensorFiveCurrent)*1.2;
+  sensorData.sensorSixPreviousHigh = (sensorData.sensorSixCurrent)*1.2;
+
+  sensorDataWriteNeeded = true;
   dataInFlight = true;                                                                      // set the data inflight flag
   webhookTimeStamp = millis();
 }
@@ -605,7 +737,6 @@ void blinkLED(int LED)                                                          
 // These are the particle functions that allow you to configure and run the device
 // They are intended to allow for customization and control during installations
 // and to allow for management.
-
 
 void publishStateTransition(void)
 {
@@ -969,13 +1100,52 @@ bool takeMeasurements()
 
     sensorDataWriteNeeded = true;
 
-    if ( ((abs(sensorData.sensorOneCurrent)-(sensorData.sensorOnePrevious)) >= 1.5) || ((abs(sensorData.sensorTwoCurrent)-(sensorData.sensorTwoPrevious)) >= 1.5) || ((abs(sensorData.sensorThreeCurrent)-(sensorData.sensorThreePrevious)) >= 1.5) || ((abs(sensorData.sensorFourCurrent)-(sensorData.sensorFourPrevious)) >= 1.5) || ((abs(sensorData.sensorFiveCurrent)-(sensorData.sensorFivePrevious)) >= 1.5) || ((abs(sensorData.sensorSixCurrent)-(sensorData.sensorSixPrevious)) >= 1.5)) {
-      // Indicate that this is a valid data array and store it
-      sensorData.validData = true;
-      sensorData.timeStamp = Time.now();
-      sensorDataWriteNeeded = true;
-      return 1;
-      } else return 0;
+    /* 
+      If statements here, check if the sensors are connected, and then compare it against the previous upper and lower bounds. If is returns true, then send that means the data is good enough to be pushed to the cloud.  
+    */    
+
+    if ( ((sysStatus.sensorTwoConnected && sensorData.sensorTwoCurrent> 1) && ((sensorData.sensorTwoCurrent < sensorData.sensorTwoPreviousLow) || (sensorData.sensorTwoCurrent > sensorData.sensorTwoPreviousHigh))))  {
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    } else if ( ((sysStatus.sensorOneConnected && sensorData.sensorOneCurrent> 1) && ((sensorData.sensorOneCurrent < sensorData.sensorOnePreviousLow) || (sensorData.sensorOneCurrent > sensorData.sensorOnePreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else if ( ((sysStatus.sensorThreeConnected && sensorData.sensorThreeCurrent >1) && ((sensorData.sensorThreeCurrent < sensorData.sensorThreePreviousLow) || (sensorData.sensorThreeCurrent > sensorData.sensorThreePreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else if ( ((sysStatus.sensorFourConnected && sensorData.sensorFourCurrent> 1) && ((sensorData.sensorFourCurrent < sensorData.sensorFourPreviousLow) || (sensorData.sensorFourCurrent > sensorData.sensorFourPreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else if ( ((sysStatus.sensorFiveConnected && sensorData.sensorFiveCurrent> 1) && ((sensorData.sensorFiveCurrent < sensorData.sensorFivePreviousLow) || (sensorData.sensorFiveCurrent > sensorData.sensorFivePreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else if ( ((sysStatus.sensorSixConnected && sensorData.sensorSixCurrent> 1) && ((sensorData.sensorSixCurrent < sensorData.sensorSixPreviousLow) || (sensorData.sensorSixCurrent > sensorData.sensorSixPreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else return 0;
   }
 
 
