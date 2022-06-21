@@ -5,6 +5,29 @@
  * Date: 1 March 2021
  */
 
+/* Alert Code Definitions
+* 0 = Normal Operations - No Alert
+// device alerts
+* 10 = Battery temp too high / low to charge
+* 11 = PMIC Reset required
+* 12 = Initialization error (likely FRAM)
+* 13 = Excessive resets
+* 14 = Out of memory
+* 15 = Particle disconnect or Modem Power Down Failure
+// deviceOS or Firmware alerts
+* 20 = Firmware update completed
+* 21 = Firmware update timed out
+* 22 = Firmware update failed
+* 23 = Update attempt limit reached - done for the day
+// Connectivity alerts
+* 30 = Particle connection timed out but Cellular connection completed
+* 31 = Failed to connect to Particle or cellular - skipping to next hour
+* 32 = Failed to connect quickly - resetting to keep trying
+// Particle cloud alerts
+* 40 = Failed to get Webhook response when connected
+*/
+
+
 /* 
   Firmware for Kumva Remote Power Monitoring System. Device samples every 10 secs and if there is a change of more than 0.5A, then data will be sent to the cloud. 
   Else it will send data every 10 minutes. It can be adjusted in "wakeBoundary" and "reportingBoundary" variables.
@@ -79,14 +102,24 @@
 // v13.02 - Made changes to JSON writer to send data only from the enabled sensor. 
 // v13.03 - Switched to JSON Writer for ubidots webhook.
 // v13.00 - Stable release - Swtiched to JSON Writer, Added payload to check device configuration, moved to change based reporting of 20%. 
-
+// v14.00 - Added change based detection to three phase load A.
+// v14.11 - testing new updated with changed reporting to 5 mins 
+// v15.00 - Deploying firmware with updated 40% change and 5 minutes duration.
+// v15.10 - Removed influx objects and test ubidots response.
+// v16.00 - Stable release with revised sampling rate of 5 minutes and reporting of 10 minutes, removed influxDB objects and functions and fixed ubidots response function.
+// v17.00 - Testing out the new version in which there are errors, and device is restting a lot. 
+// v17.10 - testing the new version of error state in which there are new changes which will adapat to the new system . 
+// v17.12 - Added more checks to see the error.
+// v17.13 - Added verbose to response codes.
+// v18.00 - Stable release with fixed resetting issue.
 // TODO  - Move three phase load to change based reporting. 
 
 
-PRODUCT_ID(11734);
-PRODUCT_VERSION(13); 
 
-const char releaseNumber[8] = "13.00";                                                      // Displays the release on the menu
+PRODUCT_ID(14661);
+PRODUCT_VERSION(18); 
+
+const char releaseNumber[8] = "18.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -141,6 +174,7 @@ struct systemStatus_structure {
   bool sensorFiveConnected;                                                                  // Check if sensor Three is connected.                                   
   bool sensorSixConnected;                                                                   // Check if sensor Three is connected.     
   int reportingBoundary;                                                                      // 0 hour 20 minutes 0 seconds
+  int alerts;                                                                                  // What is the current alert value - see secret decoder ring at top of comments
 
   int operatingMode;                                                                              // Check the operation mode,  
   /*
@@ -183,10 +217,17 @@ struct sensor_data_struct {                                                     
   float sensorFivePreviousLow;
   float sensorSixPreviousLow;
 
+
   // Three phase sensors with 3 wires. Maximum of two such devices can be connected.
 
   float I_ThreePhaseLoad_One[3]={0};                                                               // Three phase load with 3 Wires.
   float P_ThreePhaseLoad_One[3]={0};                                                               // Power for three phase load with 3 wires.
+
+  float ThreePhaseLoadOnePreviousHigh;      
+  float ThreePhaseLoadOnePreviousLow;
+
+  float ThreePhaseLoadTwoPreviousHigh;      
+  float ThreePhaseLoadTwoPreviousLow;
 
   float I_ThreePhaseLoad_Two[3]={0};                                                               // Three phase load with 3 Wires.
   float P_ThreePhaseLoad_Two[3]={0};                                                               // Power for three phase load with 3 wires.
@@ -217,7 +258,7 @@ const int donePin = D5;
 volatile bool watchdogFlag=false;                                                           // Flag to let us know we need to pet the dog
 
 // Timing Variables
-const unsigned long webhookWait = 45000;                                                    // How long will we wair for a WebHook response
+const unsigned long webhookWait = 50000;                                                     // How long will we wait for a WebHook response
 const unsigned long resetWait   = 300000;                                                   // How long will we wait in ERROR_STATE until reset
 
 unsigned long webhookTimeStamp  = 0;                                                        // Webhooks...
@@ -226,8 +267,6 @@ bool dataInFlight = false;
 
 // Variables Related To Particle Mobile Application Reporting
 // Simplifies reading values in the Particle Mobile Application
-char temperatureString[16];
-char humidityString[16];
 char batteryContextStr[16];                                                                 // One word that describes whether the device is getting power, charging, discharging or too cold to charge
 
 // Constant Values to be printed in console.
@@ -246,7 +285,7 @@ float voltage;                                                                  
 double Vrms=220;                                                                          // Standard Utility Voltage , Can be modified for better accuracy
 
 // Time Period Related Variables
-const int wakeBoundary = 0*3600 + 0*60 + 5;                                                // 0 hour 20 minutes 0 seconds
+const int wakeBoundary = 0*3600 + 5*60 + 0;                                                // 0 hour 20 minutes 0 seconds
 
 retained CloudConfigData<256> retainedConfig;
 
@@ -280,7 +319,11 @@ void setup() {
   char StartupMessage[64] = "Startup Successful";                                           // Messages from Initialization
   state = INITIALIZATION_STATE;
 
-  Particle.subscribe(System.deviceID() + "/hook-response/powermonitoring_hook/", UbidotsHandler, MY_DEVICES);
+  // Particle.subscribe(System.deviceID() + "/hook-response/powermonitoring_hook/", UbidotsHandler, MY_DEVICES);
+  char responseTopic[125];
+  String deviceID = System.deviceID();              // Multiple devices share the same hook - keeps things straight
+  deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
+  Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
 
   // Particle Variables for debugging and mobile application
   Particle.variable("Release",releaseNumber);
@@ -357,6 +400,7 @@ void setup() {
     fram.get(FRAM::sysStatusAddr,sysStatus);                                                // Loads the System Status array from FRAM
   }
 
+
   checkConstantValues();
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
@@ -405,12 +449,11 @@ void loop() {
     break;
 
   case MEASURING_STATE:                                                                     // Take measurements prior to sending
-    
+   {
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
     takeMeasurements();
     state = REPORTING_STATE;
-   
-   break;
+   } break;
 
   case REPORTING_STATE: 
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
@@ -422,25 +465,34 @@ void loop() {
     }
     else {
       Particle.connect();
-      state = IDLE_STATE;
+      sendEvent();    
+      state = RESP_WAIT_STATE;
       resetTimeStamp = millis();
     }
     break;
 
-  case RESP_WAIT_STATE:
-    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
+  case RESP_WAIT_STATE:{
+    static unsigned long webhookTimeStamp = 0;                         // Webhook time stamp
+    if (state != oldState) {
+      webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
+      dataInFlight = true;                                             // set the data inflight flag
+      if (sysStatus.verboseMode) publishStateTransition();
+    }
 
-    if (!dataInFlight && !(Time.now() % wakeBoundary))                                       // Response received back to IDLE state - make sure we don't allow repetivie reporting events
+    if (!dataInFlight)                                                   // Response received back to IDLE state - make sure we don't allow repetivie reporting events
     {
      state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {                                   // If it takes too long - will need to reset
+      publishQueue.publish("InFlight",String(dataInFlight),PRIVATE);
+      publishQueue.publish("ERROR LOG","GOING TO ERROR FROM RESP WAIT",PRIVATE);
       resetTimeStamp = millis();
       publishQueue.publish("spark/device/session/end", "", PRIVATE);                        // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                                                  // Response timed out
       resetTimeStamp = millis();
     }
-    break;
+  }break;
+    
 
   
   case ERROR_STATE:                                                                         // To be enhanced - where we deal with errors
@@ -549,74 +601,39 @@ void sendEvent()
   
   // Use JSON Writer to create JSON Payload for influx webhook data.
 
-  char influx_hook[512];                                                                        // Influx webhook data.
   char ubidots_hook[256];                                                                               // Ubidots webhook data.
-  
-  // Influx webhook data.  
-  memset(influx_hook, 0, sizeof(influx_hook));
-  JSONBufferWriter influxPayload(influx_hook, sizeof(influx_hook));
-
-  // Ubidots webhook data
+    // Ubidots webhook data
   memset(ubidots_hook, 0, sizeof(ubidots_hook));
   JSONBufferWriter ubidotsPayLoad(ubidots_hook, sizeof(ubidots_hook));
 
   // Begin Payload
-  influxPayload.beginObject();
   ubidotsPayLoad.beginObject();
 
   // Start Tags Objects
-    influxPayload.name("tags");
-    influxPayload.beginObject();
-      influxPayload.name("alias").value(CloudConfig::instance().getString("alias"));
-      influxPayload.name("lat").value(CloudConfig::instance().getString("lat"));
-      influxPayload.name("longitude").value(CloudConfig::instance().getString("longitude"));
-      influxPayload.name("product").value(CloudConfig::instance().getString("product"));
-      influxPayload.name("client").value(CloudConfig::instance().getString("client"));
-      influxPayload.name("Device-Name").value(DeviceNameHelperRetained::instance().getName());
-      influxPayload.name("device_id").value(myDeviceID.c_str());
-    influxPayload.endObject();
-  // Values ObjectinfluxPayload
-    influxPayload.name("values");
-    influxPayload.beginObject();
-      // Case 1: If operating mode is 1. 
+        // Case 1: If operating mode is 1. 
       if (sysStatus.operatingMode == 1){
         if (sysStatus.sensorOneConnected) {
-          influxPayload.name("sensorOne").value(sensorData.sensorOneCurrent);
           ubidotsPayLoad.name("sensorOne").value(sensorData.sensorOneCurrent);
         }
         if (sysStatus.sensorTwoConnected) {
-          influxPayload.name("sensorTwo").value(sensorData.sensorTwoCurrent);
           ubidotsPayLoad.name("sensorTwo").value(sensorData.sensorTwoCurrent);
           }
         if (sysStatus.sensorThreeConnected) {
-          influxPayload.name("sensorThree").value(sensorData.sensorThreeCurrent);
           ubidotsPayLoad.name("sensorThree").value(sensorData.sensorThreeCurrent);
-
           }
         if (sysStatus.sensorFourConnected) {
-          influxPayload.name("sensorFour").value(sensorData.sensorFourCurrent);
           ubidotsPayLoad.name("sensorFour").value(sensorData.sensorFourCurrent);
           }
         if (sysStatus.sensorFiveConnected) {
-          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
           ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
           }
         if (sysStatus.sensorSixConnected) {
-          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
           ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
           }
-        influxPayload.name("Mode").value(sysStatus.operatingMode);
         ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
       }
       // Case 2: If operating mode is 2. 
       else if (sysStatus.operatingMode == 2){
-        influxPayload.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
-        influxPayload.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
-        influxPayload.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
-        influxPayload.name("SensorTwoR").value(sensorData.I_ThreePhaseLoad_Two[0]);
-        influxPayload.name("SensorTwoS").value(sensorData.I_ThreePhaseLoad_Two[1]);
-        influxPayload.name("SensorTwoT").value(sensorData.I_ThreePhaseLoad_Two[2]);
-        influxPayload.name("Mode").value(sysStatus.operatingMode);
 
         ubidotsPayLoad.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
         ubidotsPayLoad.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
@@ -628,80 +645,61 @@ void sendEvent()
       }
       // Case 3: If operating mode is 3. 
       else if (sysStatus.operatingMode == 3){
-        influxPayload.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
-        influxPayload.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
-        influxPayload.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
-
         ubidotsPayLoad.name("SensorOneR").value(sensorData.I_ThreePhaseLoad_One[0]);
         ubidotsPayLoad.name("SensorOneS").value(sensorData.I_ThreePhaseLoad_One[1]);
         ubidotsPayLoad.name("SensorOneT").value(sensorData.I_ThreePhaseLoad_One[2]);
 
         if (sysStatus.sensorFourConnected) {
-          influxPayload.name("sensorFour").value(sensorData.sensorFourCurrent);
           ubidotsPayLoad.name("sensorFour").value(sensorData.sensorFourCurrent);
           }
         if (sysStatus.sensorFiveConnected) {
-          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
           ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
           }
         if (sysStatus.sensorSixConnected) {
-          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
           ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
           }
-        influxPayload.name("Mode").value(sysStatus.operatingMode);
         ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
       }
       // Case 3: If operating mode is 4. 
       else if (sysStatus.operatingMode == 4){
-        influxPayload.name("SensorOneR").value(sensorData.Four_ThreePhaseLoad_I[0]);
-        influxPayload.name("SensorOneS").value(sensorData.Four_ThreePhaseLoad_I[1]);
-        influxPayload.name("SensorOneT").value(sensorData.Four_ThreePhaseLoad_I[2]);
-        influxPayload.name("SensorOneN").value(sensorData.Four_ThreePhaseLoad_I[3]);
-
         ubidotsPayLoad.name("SensorOneR").value(sensorData.Four_ThreePhaseLoad_I[0]);
         ubidotsPayLoad.name("SensorOneS").value(sensorData.Four_ThreePhaseLoad_I[1]);
         ubidotsPayLoad.name("SensorOneT").value(sensorData.Four_ThreePhaseLoad_I[2]);
         ubidotsPayLoad.name("SensorOneN").value(sensorData.Four_ThreePhaseLoad_I[3]);
 
         if (sysStatus.sensorFiveConnected) {
-          influxPayload.name("sensorFive").value(sensorData.sensorFiveCurrent);
           ubidotsPayLoad.name("sensorFive").value(sensorData.sensorFiveCurrent);
           }
         if (sysStatus.sensorSixConnected) {
-          influxPayload.name("sensorSix").value(sensorData.sensorSixCurrent);
           ubidotsPayLoad.name("sensorSix").value(sensorData.sensorSixCurrent);
           }
-
-        influxPayload.name("Mode").value(sysStatus.operatingMode);
         ubidotsPayLoad.name("Mode").value(sysStatus.operatingMode);
       }
-    influxPayload.endObject();
   
   ubidotsPayLoad.endObject();
-  influxPayload.endObject();
   
   publishQueue.publish("powermonitoring_hook", ubidots_hook, PRIVATE);
-  publishQueue.publish("influx_hook", influx_hook, PRIVATE);
   
   // Update the previous sensor values.
-  sensorData.sensorOnePreviousLow = (sensorData.sensorOneCurrent)*0.8;
-  sensorData.sensorTwoPreviousLow = (sensorData.sensorTwoCurrent)*0.8;
-  sensorData.sensorThreePreviousLow = (sensorData.sensorThreeCurrent)*0.8;
-  sensorData.sensorFourPreviousLow = (sensorData.sensorFourCurrent)*0.8;
-  sensorData.sensorFivePreviousLow = (sensorData.sensorFiveCurrent)*0.8;
-  sensorData.sensorSixPreviousLow = (sensorData.sensorSixCurrent)*0.8;
+  sensorData.sensorOnePreviousLow = (sensorData.sensorOneCurrent)*0.6;
+  sensorData.sensorTwoPreviousLow = (sensorData.sensorTwoCurrent)*0.6;
+  sensorData.sensorThreePreviousLow = (sensorData.sensorThreeCurrent)*0.6;
+  sensorData.sensorFourPreviousLow = (sensorData.sensorFourCurrent)*0.6;
+  sensorData.sensorFivePreviousLow = (sensorData.sensorFiveCurrent)*0.6;
+  sensorData.sensorSixPreviousLow = (sensorData.sensorSixCurrent)*0.6;
+  sensorData.ThreePhaseLoadOnePreviousLow = (sensorData.I_ThreePhaseLoad_One[0])*0.6;
 
   // Update the previous sensor values.
-  sensorData.sensorOnePreviousHigh = (sensorData.sensorOneCurrent)*1.2;
-  sensorData.sensorTwoPreviousHigh = (sensorData.sensorTwoCurrent)*1.2;
-  sensorData.sensorThreePreviousHigh= (sensorData.sensorThreeCurrent)*1.2;
-  sensorData.sensorFourPreviousHigh = (sensorData.sensorFourCurrent)*1.2;
-  sensorData.sensorFivePreviousHigh = (sensorData.sensorFiveCurrent)*1.2;
-  sensorData.sensorSixPreviousHigh = (sensorData.sensorSixCurrent)*1.2;
+  sensorData.sensorOnePreviousHigh = (sensorData.sensorOneCurrent)*1.4;
+  sensorData.sensorTwoPreviousHigh = (sensorData.sensorTwoCurrent)*1.4;
+  sensorData.sensorThreePreviousHigh= (sensorData.sensorThreeCurrent)*1.4;
+  sensorData.sensorFourPreviousHigh = (sensorData.sensorFourCurrent)*1.4;
+  sensorData.sensorFivePreviousHigh = (sensorData.sensorFiveCurrent)*1.4;
+  sensorData.sensorSixPreviousHigh = (sensorData.sensorSixCurrent)*1.4;
+  sensorData.ThreePhaseLoadOnePreviousHigh = (sensorData.I_ThreePhaseLoad_One[0])*1.4;
 
   sensorDataWriteNeeded = true;
-  dataInFlight = true;                                                                      // set the data inflight flag
-  webhookTimeStamp = millis();
+
 }
 
 void UbidotsHandler(const char *event, const char *data) {            // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -709,15 +707,32 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
     // Response is only a single number thanks to Template
   if (!strlen(data)) {                                                // No data in response - Error
     snprintf(responseString, sizeof(responseString),"No Data");
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
   }
   else if (atoi(data) == 200 || atoi(data) == 201) {
     snprintf(responseString, sizeof(responseString),"Response Received");
+    
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
+    
     sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
     sysStatusWriteNeeded = true;
     dataInFlight = false;                                             // Data has been received
   }
   else if((atoi(data)) < 10000){
     snprintf(responseString, sizeof(responseString), "Unknown response recevied %i",atoi(data));
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
   }
   
 }
@@ -1139,6 +1154,13 @@ bool takeMeasurements()
     return 1;
     }
     else if ( ((sysStatus.sensorSixConnected && sensorData.sensorSixCurrent> 1) && ((sensorData.sensorSixCurrent < sensorData.sensorSixPreviousLow) || (sensorData.sensorSixCurrent > sensorData.sensorSixPreviousHigh))) ){
+    // Indicate that this is a valid data array and store it
+    sensorData.validData = true;
+    sensorData.timeStamp = Time.now();
+    sensorDataWriteNeeded = true;
+    return 1;
+    }
+    else if ( (((sysStatus.operatingMode == 2 || sysStatus.operatingMode ==3) && sensorData.I_ThreePhaseLoad_One[0]> 1) && ((sensorData.I_ThreePhaseLoad_One[0] < sensorData.ThreePhaseLoadOnePreviousLow) || (sensorData.I_ThreePhaseLoad_One[0] > sensorData.ThreePhaseLoadOnePreviousHigh))) ){
     // Indicate that this is a valid data array and store it
     sensorData.validData = true;
     sensorData.timeStamp = Time.now();
