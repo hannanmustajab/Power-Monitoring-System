@@ -113,6 +113,11 @@
 // v15.00 - Deploying firmware with updated 40% change and 5 minutes duration.
 // v15.10 - Removed influx objects and test ubidots response.
 // v16.00 - Stable release with revised sampling rate of 5 minutes and reporting of 10 minutes, removed influxDB objects and functions and fixed ubidots response function.
+// v17.00 - Testing out the new version in which there are errors, and device is restting a lot. 
+// v17.10 - testing the new version of error state in which there are new changes which will adapat to the new system . 
+// v17.12 - Added more checks to see the error.
+// v17.13 - Added verbose to response codes.
+// v18.00 - Stable release with fixed resetting issue.
 // TODO  - Move three phase load to change based reporting. 
 
 
@@ -152,11 +157,11 @@ void loadEmonlib();
 int resetSystem(String Command);
 int sendConfigurationFunction(String command);
 void sendConfiguration();
-#line 114 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
+#line 119 "/Users/abdulhannanmustajab/Desktop/IoT/Power-Monitoring/PowerMonitoring/src/PowerMonitoring.ino"
 PRODUCT_ID(14661);
-PRODUCT_VERSION(16); 
+PRODUCT_VERSION(18); 
 
-const char releaseNumber[8] = "16.00";                                                      // Displays the release on the menu
+const char releaseNumber[8] = "18.00";                                                      // Displays the release on the menu
 
 // Included Libraries
 #include "math.h"
@@ -295,7 +300,7 @@ const int donePin = D5;
 volatile bool watchdogFlag=false;                                                           // Flag to let us know we need to pet the dog
 
 // Timing Variables
-const unsigned long webhookWait = 45000;                                                    // How long will we wair for a WebHook response
+const unsigned long webhookWait = 50000;                                                     // How long will we wait for a WebHook response
 const unsigned long resetWait   = 300000;                                                   // How long will we wait in ERROR_STATE until reset
 
 unsigned long webhookTimeStamp  = 0;                                                        // Webhooks...
@@ -486,12 +491,11 @@ void loop() {
     break;
 
   case MEASURING_STATE:                                                                     // Take measurements prior to sending
-    
+   {
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
     takeMeasurements();
     state = REPORTING_STATE;
-   
-   break;
+   } break;
 
   case REPORTING_STATE: 
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
@@ -503,25 +507,34 @@ void loop() {
     }
     else {
       Particle.connect();
-      state = IDLE_STATE;
+      sendEvent();    
+      state = RESP_WAIT_STATE;
       resetTimeStamp = millis();
     }
     break;
 
-  case RESP_WAIT_STATE:
-    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
+  case RESP_WAIT_STATE:{
+    static unsigned long webhookTimeStamp = 0;                         // Webhook time stamp
+    if (state != oldState) {
+      webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
+      dataInFlight = true;                                             // set the data inflight flag
+      if (sysStatus.verboseMode) publishStateTransition();
+    }
 
-    if (!dataInFlight && !(Time.now() % wakeBoundary))                                       // Response received back to IDLE state - make sure we don't allow repetivie reporting events
+    if (!dataInFlight)                                                   // Response received back to IDLE state - make sure we don't allow repetivie reporting events
     {
      state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {                                   // If it takes too long - will need to reset
+      publishQueue.publish("InFlight",String(dataInFlight),PRIVATE);
+      publishQueue.publish("ERROR LOG","GOING TO ERROR FROM RESP WAIT",PRIVATE);
       resetTimeStamp = millis();
       publishQueue.publish("spark/device/session/end", "", PRIVATE);                        // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                                                  // Response timed out
       resetTimeStamp = millis();
     }
-    break;
+  }break;
+    
 
   
   case ERROR_STATE:                                                                         // To be enhanced - where we deal with errors
@@ -649,7 +662,6 @@ void sendEvent()
           }
         if (sysStatus.sensorThreeConnected) {
           ubidotsPayLoad.name("sensorThree").value(sensorData.sensorThreeCurrent);
-
           }
         if (sysStatus.sensorFourConnected) {
           ubidotsPayLoad.name("sensorFour").value(sensorData.sensorFourCurrent);
@@ -729,8 +741,7 @@ void sendEvent()
   sensorData.ThreePhaseLoadOnePreviousHigh = (sensorData.I_ThreePhaseLoad_One[0])*1.4;
 
   sensorDataWriteNeeded = true;
-  dataInFlight = true;                                                                      // set the data inflight flag
-  webhookTimeStamp = millis();
+
 }
 
 void UbidotsHandler(const char *event, const char *data) {            // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -738,18 +749,32 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
     // Response is only a single number thanks to Template
   if (!strlen(data)) {                                                // No data in response - Error
     snprintf(responseString, sizeof(responseString),"No Data");
-    publishQueue.publish("Response Event",responseString,PRIVATE);
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
   }
   else if (atoi(data) == 200 || atoi(data) == 201) {
     snprintf(responseString, sizeof(responseString),"Response Received");
-    publishQueue.publish("Response Event",responseString,PRIVATE);
+    
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
+    
     sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
     sysStatusWriteNeeded = true;
     dataInFlight = false;                                             // Data has been received
   }
   else if((atoi(data)) < 10000){
     snprintf(responseString, sizeof(responseString), "Unknown response recevied %i",atoi(data));
-    publishQueue.publish("Response Event",responseString,PRIVATE);
+    // Publish the response code and event if verbose mode. 
+    if (sysStatus.verboseMode){
+      publishQueue.publish("Response Event",responseString,PRIVATE);
+      publishQueue.publish("Response Code",String(atoi(data)),PRIVATE);
+    }
   }
   
 }

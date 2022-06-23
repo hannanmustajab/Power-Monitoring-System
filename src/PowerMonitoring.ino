@@ -260,7 +260,6 @@ volatile bool watchdogFlag=false;                                               
 // Timing Variables
 const unsigned long webhookWait = 50000;                                                     // How long will we wait for a WebHook response
 const unsigned long resetWait   = 300000;                                                   // How long will we wait in ERROR_STATE until reset
-
 unsigned long webhookTimeStamp  = 0;                                                        // Webhooks...
 unsigned long resetTimeStamp    = 0;                                                        // Resets - this keeps you from falling into a reset loop
 bool dataInFlight = false;
@@ -472,29 +471,21 @@ void loop() {
     break;
 
   case RESP_WAIT_STATE:{
-    static unsigned long webhookTimeStamp = 0;                         // Webhook time stamp
-    if (state != oldState) {
-      webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
-      dataInFlight = true;                                             // set the data inflight flag
-      if (sysStatus.verboseMode) publishStateTransition();
-    }
+    static unsigned long webhookTimeStamp = 0;                                              // Webhook time stamp
+    if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
 
-    if (!dataInFlight)                                                   // Response received back to IDLE state - make sure we don't allow repetivie reporting events
+    if (!dataInFlight)                                                                     // Response received back to IDLE state - make sure we don't allow repetivie reporting events
     {
      state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {                                   // If it takes too long - will need to reset
-      publishQueue.publish("InFlight",String(dataInFlight),PRIVATE);
-      publishQueue.publish("ERROR LOG","GOING TO ERROR FROM RESP WAIT",PRIVATE);
       resetTimeStamp = millis();
       publishQueue.publish("spark/device/session/end", "", PRIVATE);                        // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                                                  // Response timed out
       resetTimeStamp = millis();
     }
   }break;
-    
-
-  
+      
   case ERROR_STATE:                                                                         // To be enhanced - where we deal with errors
     if (state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait)
@@ -697,6 +688,9 @@ void sendEvent()
   sensorData.sensorFivePreviousHigh = (sensorData.sensorFiveCurrent)*1.4;
   sensorData.sensorSixPreviousHigh = (sensorData.sensorSixCurrent)*1.4;
   sensorData.ThreePhaseLoadOnePreviousHigh = (sensorData.I_ThreePhaseLoad_One[0])*1.4;
+
+  webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
+  dataInFlight = true;                                             // set the data inflight flag
 
   sensorDataWriteNeeded = true;
 
