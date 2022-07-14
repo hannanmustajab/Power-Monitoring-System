@@ -112,14 +112,17 @@
 // v17.12 - Added more checks to see the error.
 // v17.13 - Added verbose to response codes.
 // v18.00 - Stable release with fixed resetting issue.
+// v19.00 - Major changes, added new connecting state and testing new functions.
+// v19.10 - Made changes to memory map, tested connecting state and response function now working. 
+// v20.00 - Tested version 19.10 on KUMVA048 and it worked fine. Now deploying!
 // TODO  - Move three phase load to change based reporting. 
 
 
 
-PRODUCT_ID(14661);
-PRODUCT_VERSION(18); 
-
-const char releaseNumber[8] = "18.00";                                                      // Displays the release on the menu
+// Particle Product definitions
+PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
+PRODUCT_VERSION(20);
+char currentPointRelease[6] ="20.00";
 
 // Included Libraries
 #include "math.h"
@@ -150,11 +153,11 @@ namespace FRAM {                                                                
     versionAddr           = 0x00,                                                           // Where we store the memory map version number - 8 Bits
     sysStatusAddr         = 0x01,                                                           // This is the status of the device
     sensorDataAddr        = 0x200,                                                           // Where we store the latest sensor data readings
-    sensorConstantsAddr   = 0xA0                                                            // Where we store CT sensor constant values.
+    sensorConstantsAddr   = 0xA0,                                                            // Where we store CT sensor constant values.
    };
 };
 
-const int FRAMversionNumber = 22;                                                            // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 23;                                                            // Increment this number each time the memory map is changed
 
 struct systemStatus_structure {                     
   uint8_t structuresVersion;                                                                // Version of the data structures (system and data)
@@ -166,7 +169,6 @@ struct systemStatus_structure {
   int stateOfCharge;                                                                                // Battery charge level
   uint8_t batteryState;                                                                             // Stores the current battery state
   int resetCount;                                                                                   // reset count of device (0-256)
-  unsigned long lastHookResponse;                                                                   // Last time we got a valid Webhook response
   bool sensorOneConnected;                                                                          // Check if sensor One is connected.                                   
   bool sensorTwoConnected;                                                                          // Check if sensor Two is connected.                                   
   bool sensorThreeConnected;;                                                                // Check if sensor Three is connected.                                   
@@ -175,7 +177,10 @@ struct systemStatus_structure {
   bool sensorSixConnected;                                                                   // Check if sensor Three is connected.     
   int reportingBoundary;                                                                      // 0 hour 20 minutes 0 seconds
   int alerts;                                                                                  // What is the current alert value - see secret decoder ring at top of comments
-
+  
+  unsigned long lastHookResponse;                                                              // Last time we got a valid Webhook response
+  unsigned long lastConnection;                                                               // Last time we successfully connected to Particle
+  uint16_t lastConnectionDuration;                                                           // How long - in seconds - did it take to last connect to the Particle cloud
   int operatingMode;                                                                              // Check the operation mode,  
   /*
     * 1 if single phase mode
@@ -185,6 +190,7 @@ struct systemStatus_structure {
   int Vrms;          // Default voltage value     
   
 } sysStatus;
+
 
 struct sensor_constants{
    float sensorOneConstant;
@@ -196,6 +202,13 @@ struct sensor_constants{
 } sensorConstants;
 
 struct sensor_data_struct {                                                               // Here we define the structure for collecting and storing data from the sensors
+  
+  int alerts;                                       // What is the current alert value - see secret decoder ring at top of comments
+  uint16_t maxConnectTime = 0;                      // Longest connect time for the hour
+  uint8_t updateAttempts = 0;                       // Number of attempted updates each day
+  bool backOff;                                     // If we are not in lowPowerMode but are struggling to connect
+  int currentConnectionLimit;                       // Here we will store the connection limit (180, 300 or 420 seconds)  - 180 indicates a new connection cycle
+
   float sensorOneCurrent;
   float sensorTwoCurrent;
   float sensorThreeCurrent;
@@ -244,8 +257,8 @@ struct sensor_data_struct {                                                     
 
 
 // State Machine Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, MEASURING_STATE, REPORTING_STATE, REPORTING_DETERMINATION, RESP_WAIT_STATE};
-char stateNames[8][26] = {"Initialize", "Error", "Idle", "Measuring","Reporting","Reporting Determination", "Response Wait"};
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, MEASURING_STATE, REPORTING_STATE, REPORTING_DETERMINATION, RESP_WAIT_STATE,CONNECTING_STATE};
+char stateNames[8][26] = {"Initialize", "Error", "Idle", "Measuring","Reporting","Reporting Determination", "Response Wait","Connecting"};
 State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
@@ -258,11 +271,14 @@ const int donePin = D5;
 volatile bool watchdogFlag=false;                                                           // Flag to let us know we need to pet the dog
 
 // Timing Variables
-const unsigned long webhookWait = 50000;                                                     // How long will we wait for a WebHook response
+const unsigned long webhookWait = 30000;                                                   // How long will we wait for a WebHook response
 const unsigned long resetWait   = 300000;                                                   // How long will we wait in ERROR_STATE until reset
 unsigned long webhookTimeStamp  = 0;                                                        // Webhooks...
 unsigned long resetTimeStamp    = 0;                                                        // Resets - this keeps you from falling into a reset loop
-bool dataInFlight = false;
+const int wakeBoundary = 0*3600 + 5*60 + 0;                                                // 0 hour 20 minutes 0 seconds
+unsigned long connectionStartTime;                                                         // Timestamp to keep track of how long it takes to connect
+unsigned long lastReportedTime = 0;                                                      // Need to keep this separate from time so we know when to report
+
 
 // Variables Related To Particle Mobile Application Reporting
 // Simplifies reading values in the Particle Mobile Application
@@ -277,14 +293,15 @@ char sensorFiveConstantStr[32];
 char sensorSixConstantStr[32];
 char batteryString[16];
 
+// Program Variables
 bool sysStatusWriteNeeded = false;                                                       // Keep track of when we need to write     
 bool sensorDataWriteNeeded = false; 
 bool constantsStatusWriteNeeded = false;
 float voltage;                                                                             // Battery voltage Argon
+bool dataInFlight = false;
+
 double Vrms=220;                                                                          // Standard Utility Voltage , Can be modified for better accuracy
 
-// Time Period Related Variables
-const int wakeBoundary = 0*3600 + 5*60 + 0;                                                // 0 hour 20 minutes 0 seconds
 
 retained CloudConfigData<256> retainedConfig;
 
@@ -325,12 +342,11 @@ void setup() {
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
 
   // Particle Variables for debugging and mobile application
-  Particle.variable("Release",releaseNumber);
+  Particle.variable("Release",currentPointRelease);
   Particle.variable("Battery", batteryString);                                              // Battery level in V as the Argon does not have a fuel cell
   Particle.variable("BatteryContext",batteryContextStr);
   Particle.variable("Keep Alive Sec",sysStatus.keepAlive);
   Particle.variable("3rd Party Sim", sysStatus.thirdPartySim);
-  
   Particle.variable("Constant One", sensorOneConstantStr);
   Particle.variable("Constant Two", sensorTwoConstantStr);
   Particle.variable("Constant Three", sensorThreeConstantStr);
@@ -357,6 +373,9 @@ void setup() {
   Particle.function("Operating Mode",setOperatingMode);                                          // Use this function to disable a sensor from the console.
   Particle.function("Reporting Duration(MINUTES)",setReportingDuration);                                   // Set reporting duration from the console, (IN MINUTES.)
   Particle.function("Reboot Device",resetSystem);
+
+  // Particle and System Set up next
+  Particle.setDisconnectOptions(CloudDisconnectOptions().graceful(true).timeout(5s));  // Don't disconnect abruptly
 
   rtc.setup();                                                        // Start the real time clock
   rtc.clearAlarm();                                                   // Ensures alarm is still not set from last cycle
@@ -399,12 +418,30 @@ void setup() {
     fram.get(FRAM::sysStatusAddr,sysStatus);                                                // Loads the System Status array from FRAM
   }
 
+   // Take note if we are restarting due to a pin reset - either by the user or the watchdog - could be sign of trouble
+  if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
+    sysStatus.resetCount++;
+    if (sysStatus.resetCount > 3) sensorData.alerts = 13;                 // Excessive resets
+  }
+
+   // Next - check to make sure we are not in an endless update loop
+  if (sensorData.updateAttempts >= 3) {
+    char data[64];
+    System.disableUpdates();                                           // We will only try to update three times in a day
+    sensorData.alerts = 23;                                                // Set an alert that we have maxed out our updates for the day
+    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",sensorData.alerts, Time.now());
+    publishQueue.publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
+  }
+
+  if (sensorData.currentConnectionLimit != 180) {
+      state = CONNECTING_STATE;                                        // We are in the middle of a connection attempt
+      Log.info("Connecting with a connection limit of %i", sensorData.currentConnectionLimit);
+    } 
 
   checkConstantValues();
   checkSystemValues();                                                                      // Make sure System values are all in valid range
 
   loadEmonlib();                                                                            // Initialize the emon library modules.
-  
 
   if (sysStatus.thirdPartySim) {
     waitFor(Particle.connected,30 * 1000); 
@@ -418,8 +455,6 @@ void setup() {
 
   if(sysStatus.verboseMode) publishQueue.publish("Startup",StartupMessage,PRIVATE);                       // Let Particle know how the startup process went
 
-  waitUntil(Particle.connected);
-
   sendConfiguration();
 
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;                                    // We made it throughgo let's go to idle
@@ -430,22 +465,21 @@ void setup() {
 void loop() {
   switch(state) {
   case IDLE_STATE:                                                                          // Idle state - brackets only needed if a variable is defined in a state    
+  {
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
 
     if (!(Time.now() % wakeBoundary)) state = REPORTING_DETERMINATION;                                                     
-    
-    break;
+  }break;
 
-  case REPORTING_DETERMINATION:
-    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
+  case REPORTING_DETERMINATION:{
+     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
     // Case One:
     if (takeMeasurements()) state = REPORTING_STATE;
     // Case Two:
     else if (!(Time.now() % sysStatus.reportingBoundary)) state = MEASURING_STATE;
     // Go back to IDLE
     else state = IDLE_STATE;
-    
-    break;
+  }break;
 
   case MEASURING_STATE:                                                                     // Take measurements prior to sending
    {
@@ -455,37 +489,92 @@ void loop() {
    } break;
 
   case REPORTING_STATE: 
-    if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
-    if (Particle.connected()) {
-      if (Time.hour() == 12) Particle.syncTime();                                           // Set the clock each day at noon
-      // takeMeasurements();
-      sendEvent();                                                                          // Send data to Ubidots
-      state = RESP_WAIT_STATE;                                                              // Wait for Response
-    }
-    else {
-      Particle.connect();
-      sendEvent();    
+  {
+    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
+    lastReportedTime = Time.now();                                     // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
+    sendEvent();                                                       // Publish hourly but not at opening time as there is nothing to publish
+    state = CONNECTING_STATE;                                          // Default behaviour would be to connect and send report to Ubidots
+
+    // Let's see if we need to connect 
+    if (Particle.connected()) {                                        // We are already connected go to response wait
       state = RESP_WAIT_STATE;
-      resetTimeStamp = millis();
     }
-    break;
+  } break;
+
+  case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state
+    static State retainedOldState;                                     // Keep track for where to go next (depends on whether we were called from Reporting)
+    static unsigned long connectionStartTimeStamp;                     // Time in Millis that helps us know how long it took to connect
+    char data[64];                                                     // Holder for message strings
+
+    if (state != oldState) {                                           // Non-blocking function - these are first time items
+      Log.info("Initializing connection with a limit of %i", sensorData.currentConnectionLimit);
+      retainedOldState = oldState;                                     // Keep track for where to go next
+      sysStatus.lastConnectionDuration = 0;                            // Will exit with 0 if we do not connect or are connected or the connection time if we do
+      publishStateTransition();
+      connectionStartTimeStamp = millis();                             // Have to use millis as the clock will get reset on connect
+      Particle.connect();                                              // Told the Particle to connect, now we need to wait
+    }
+
+    sysStatus.lastConnectionDuration = int((millis() - connectionStartTimeStamp)/1000);
+
+    if (Particle.connected()) {
+      sysStatusWriteNeeded = true;
+      sensorDataWriteNeeded = true;
+
+      if (sensorData.currentConnectionLimit != 180) {                     // If we have reset due to connection speed, we need to add these back in
+        if (sensorData.currentConnectionLimit >= 300) sysStatus.lastConnectionDuration += 180;
+        if (sensorData.currentConnectionLimit == 420) sysStatus.lastConnectionDuration += 300;
+      }
+      sensorData.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
+      sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
+      if (sysStatus.lastConnectionDuration > sensorData.maxConnectTime) sensorData.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+
+      snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+      Log.info(data);
+      if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
+
+      (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
+    }
+    else if (sysStatus.lastConnectionDuration > sensorData.currentConnectionLimit) {
+      Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, sensorData.currentConnectionLimit);
+      sensorDataWriteNeeded = true;                                 // Record in FRAM as we will soon reset
+      state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
+      switch (sensorData.currentConnectionLimit) {
+        case (180):                                                    // A connection limit of 180 indicates that this is a new attempt
+          sensorData.currentConnectionLimit = 300;                        // Increment the limit to the next value
+          sensorData.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("3 Minute connection time exceeded - resetting");
+          break; 
+        case (300): 
+          sensorData.currentConnectionLimit = 420;                        // Increment the limit to the next value
+          sensorData.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("5 Minute connection time exceeded - resetting");
+          break;  
+        case (420):
+          sensorData.currentConnectionLimit = 180;                        // Giving up - we are not going to connect this hour - reset for next
+          sensorData.alerts = 31;                                         // Indicates we are done with this attempt
+          Log.info("7 Minute connection time exceeded - giving up");
+          break;                              
+      }
+    }
+   } break;
 
   case RESP_WAIT_STATE:{
-    static unsigned long webhookTimeStamp = 0;                                              // Webhook time stamp
-    if (sysStatus.verboseMode && state != oldState) publishStateTransition();               // Reporting - hourly or on command
+    if (state != oldState) {
+      webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
+      dataInFlight = true;                                             // set the data inflight flag
+      publishStateTransition();
+    }
+    if (!dataInFlight)  {                                              // Response received --> back to IDLE state
+      state = IDLE_STATE;
+    }
+    else if (millis() - webhookTimeStamp > webhookWait) {              // If it takes too long - will need to reset
+      sensorData.alerts = 40;                                             // Raise the missed webhook flag
+      sensorDataWriteNeeded = true;
+      state = ERROR_STATE;                                             // Go to the ERROR state to decide our fate
+    }
+  } break;
 
-    if (!dataInFlight)                                                                     // Response received back to IDLE state - make sure we don't allow repetivie reporting events
-    {
-     state = IDLE_STATE;
-    }
-    else if (millis() - webhookTimeStamp > webhookWait) {                                   // If it takes too long - will need to reset
-      resetTimeStamp = millis();
-      publishQueue.publish("spark/device/session/end", "", PRIVATE);                        // If the device times out on the Webhook response, it will ensure a new session is started on next connect
-      state = ERROR_STATE;                                                                  // Response timed out
-      resetTimeStamp = millis();
-    }
-  }break;
-      
   case ERROR_STATE:                                                                         // To be enhanced - where we deal with errors
     if (state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait)
@@ -1220,7 +1309,7 @@ void sendConfiguration(){
   JSONBufferWriter writer(data, sizeof(data));
   writer.beginObject();
     writer.name("Name").value(DeviceNameHelperRetained::instance().getName());
-    writer.name("Release").value(releaseNumber);
+    writer.name("Release").value(currentPointRelease);
     writer.name("Operating Mode").value(String(sysStatus.operatingMode));
     writer.name("Sensors");
     writer.beginObject();
